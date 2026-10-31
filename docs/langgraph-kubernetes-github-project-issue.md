@@ -1,296 +1,352 @@
-# LangGraph on Kubernetes for GitHub Project Issue Completion
+# LangGraph Multi-Repo Task Platform on Kubernetes
 
 ## 1. Problem framing
 
-A GitHub Project issue is rarely a single edit. It usually requires gathering context, deciding what to change, implementing code, validating behavior, and then recording the outcome in a pull request or project update. Doing this with a single unstructured agent is brittle: it can drift, lose state, or make unsafe changes when the repository is large or policy-sensitive.
+The goal is not to build a single autonomous coding assistant. The goal is to build a managed engineering platform that can accept work from GitHub issues, route that work to the right repository and execution context, coordinate a bounded workflow, and return a validated result with clear human oversight.
 
-The core challenge is not just “generate code”; it is to execute a constrained engineering workflow with state, retries, approvals, and verification in a way that is auditable and safe. LangGraph provides the orchestration model for this, while Kubernetes provides the runtime isolation and operational controls required to run the workflow at scale.
+A GitHub issue is rarely just a patch. It often combines context gathering, root-cause analysis, implementation, validation, documentation, and status updates. In a multi-repository environment, those tasks become even more complex because the platform must handle repository boundaries, differing toolchains, varying ownership models, and different risk profiles.
 
-## 2. Goals
+The architecture therefore centers on three ideas:
 
-- Convert a GitHub issue into a bounded, auditable engineering workflow.
-- Keep the decision-making process explicit, inspectable, and reversible.
-- Execute code changes in a controlled runtime with validation before merge.
-- Use GitHub-native integrations for issue intake, branch creation, code review, and status updates.
-- Support human-in-the-loop approvals for high-risk tasks.
-- Scale the platform to multiple concurrent tasks without sacrificing safety.
+- a multi-repository task platform rather than a single-repo bot,
+- a graph-based orchestration layer with explicit state transitions, policy controls, and an auditable PR lifecycle,
+- a Kubernetes execution model that isolates work, scales safely, and keeps operational control in the platform rather than in the model.
 
-### Non-goals
+## 2. Design decisions we settled on
 
-- Fully autonomous destructive operations without review.
-- Running untrusted code on the host cluster.
-- Allowing agents to directly mutate production infrastructure without a defined gate.
+### 2.1 Multi-repo task platform
 
-## 3. Architecture overview
+The platform is designed for many repositories, not one. Each task belongs to exactly one repository, which may be a monorepo. A single task does not coordinate changes across repositories. Work is modeled as tasks with metadata such as:
 
-The architecture is a layered workflow system:
+- exactly one target repository (which may be a monorepo),
+- issue or ticket source,
+- repository-defined validation requirements and result sources,
+- risk level,
+- ownership or reviewer hints,
+- expected completion state.
 
-1. GitHub triggers issue creation or status change.
-2. An ingress layer receives events and normalizes them into an execution request.
-3. A LangGraph orchestration service maintains state and coordinates workflow steps.
-4. Specialized tools and workers perform repository inspection, code generation, tests, and PR preparation.
-5. A Kubernetes runtime executes isolated jobs for code generation and validation.
-6. A state store and event stream allow retries, auditing, and replay.
+The system treats repository context as first-class data. A task can be routed to its repository's codebase, build environment, and validation path without hard-coding one repo into the orchestrator. This allows the same workflow engine to operate across multiple projects while preserving repo-specific policies.
 
-A simplified runtime model is:
+### 2.2 Specialized, bounded workers
 
-- GitHub App / webhook -> Event router -> Work queue -> LangGraph agent -> Tools / repos / CI / validation -> PR / status updates
+We are not using a single general-purpose agent to “do everything.” Instead, the platform is composed of specialized workers with narrow responsibilities. Examples include:
 
-Key design principle: the graph should represent a disciplined engineering process, not a free-form chatbot loop. Each node should be deterministic, observable, and enforce boundaries around inputs, outputs, and approvals.
+- issue intake and normalization,
+- repo context and dependency discovery,
+- patch generation and refactoring,
+- GitHub-native CI result intake and validation evidence review,
+- PR description and release-note preparation,
+- documentation maintenance for confirmed design decisions,
+- review and risk triage.
 
-## 4. Proposed system components
+Each worker has bounded inputs, bounded outputs, and a clear contract. This reduces drift, makes retries easier to reason about, and improves observability. The orchestrator remains in charge of sequencing work; the workers do the requested execution within a specific contract.
+Each worker has bounded inputs, bounded outputs, and a clear contract. This reduces drift, makes retries easier to reason about, and improves observability. LangGraph's responsibility is limited to producing a PR through bounded repository and GitHub operations. It must not run or invoke external commands, including arbitrary shell or process execution.
 
-### 4.1 Event ingestion
+The documentation worker is a narrow maintainer and governance role: it records already-resolved and confirmed design decisions in the architecture documentation and relevant README summaries, and returns a concise change summary and any open questions. It must not invent decisions or publish intermediate thoughts.
 
-- GitHub App or webhook receiver for issue events, project card updates, and PR events.
-- Event router that translates GitHub payloads into a canonical execution request.
-- Optional queue such as Kafka, NATS, or Redis Streams to decouple ingestion from orchestration.
+### 2.3 Model-to-role routing
 
-### 4.2 LangGraph orchestrator
+The system does not use one model for every job. Instead, models are assigned by role based on task characteristics:
 
-The LangGraph service owns the workflow graph and state machine. It tracks:
+- small, low-cost models for classification, triage, and metadata extraction,
+- reasoning-oriented models for planning, root-cause analysis, and architecture decisions,
+- code-focused models for patch generation and refactoring,
+- validation or review models for checking correctness, regression risk, and summary quality.
 
-- issue metadata and labels
-- repository context
-- branch and commit status
-- task plan
-- tool execution history
-- human approval checkpoints
-- final validation results
+This allows a task to use the cheapest model that can safely do the job while reserving more expensive reasoning models for decisions where depth matters. Routing is explicit and policy-driven, not ad hoc.
 
-This service should persist workflow state in a durable store so it can resume after crashes or restarts.
+### 2.4 Hybrid worker pools
 
-### 4.3 Repository and tooling layer
+The execution model is hybrid:
 
-- Code search tools for file lookup and symbol discovery
-- Git operations through a protected executor
-- LLM tools for summarization, patch generation, and refactoring
-- Static analysis, unit test runners, and repo-specific validation commands
-- PR creation and status update tooling
+- long-lived services handle orchestration, queueing, and workflow state,
+- bounded workers support repository context gathering, patch preparation, and PR production,
+- GitHub-native CI may run repository-configured checks in response to repository or project events, independently of LangGraph,
+- humans initiate the normal workflow by setting a GitHub Project task to `ready` and authorize completion by merging its PR only after CI succeeds.
 
-These tools are best exposed as strict interfaces rather than raw shell access. Each tool should define:
+This combination gives us both responsiveness and operational control. Long-lived services keep the graph responsive, while isolated short-lived jobs keep the platform resilient and easier to scale.
 
-- input schema
-- expected side effects
-- timeout limits
-- retry policy
-- output contract
+### 2.5 Human authorization and risk policy
 
-### 4.4 Execution runtime
+The normal task flow has two human actions: set the GitHub Project task to `ready`, which triggers CI/workflow intake, and merge the resulting PR. LangGraph performs bounded work to produce a PR and may create or update its task branch, but it cannot merge the PR or directly change the target branch. The workflow identifies potential risks and summarizes them in the PR so the human can double-check the proposed patch before deciding whether to merge. Limited automation authority does not mean the proposed patch is risk-free; it may still have security, data, infrastructure, production, or customer-facing impact. All GitHub-native CI checks for the PR must report success before merge; pending, unavailable, errored, or failed checks block merge, with no human override. A successful merge automatically sets the task to `done`, so a PR blocked by CI cannot complete the task. There is no separate routine or high-risk human approval gate before PR creation or merge.
 
-The execution runtime runs code in isolated Kubernetes workloads. Typical workloads include:
+Risk identification and initial classification belong to the workflow; the human reviews the surfaced risks and owns the merge decision. The exact risk scoring or classification method remains unspecified. Each task should include validation results, a scope summary, a PR risk summary, and an audit trail.
 
-- planning jobs
-- repository inspection jobs
-- code generation jobs
-- test execution jobs
-- packaging or build validation jobs
+### 2.6 LangGraph tools instead of first-class skills
 
-The graph should prefer small, short-lived jobs over a single long-running pod, so failures are easier to isolate and retries are more controlled.
+The orchestration layer uses LangGraph tools as the interface for bounded PR-producing operations, not “first-class skills” as a separate abstraction. In practice, this means:
 
-## 5. Workflow nodes
+- tools are the callable contract between the graph and the runtime,
+- each tool exposes a defined schema, side effects, timeout, retry conditions, and return format,
+- each tool exposes a defined schema, side effects, timeout, retry conditions, and return format; tools must not run or invoke external commands,
+- the graph can compose tools into stateful workflows without baking agent behavior into a rigid skill taxonomy,
+- PR production remains portable and inspectable because the graph operates on structured tool calls, not hidden capabilities.
 
-A production-ready graph should have explicit nodes rather than a single “do everything” step.
+This keeps the platform aligned with LangGraph’s orchestration model and avoids building a parallel conceptual layer that duplicates tool interfaces. The graph orchestrates workflows; tools perform the concrete repository actions.
+This keeps the platform aligned with LangGraph’s orchestration model and avoids building a parallel conceptual layer that duplicates tool interfaces. The graph orchestrates bounded repository and GitHub operations needed to produce a PR; it does not launch external commands.
 
-### Node 1: Intake and normalization
+### 2.7 Revised Kubernetes deployment model
 
-- Parse issue text, acceptance criteria, labels, and linked PRs.
-- Determine the target repository, branch, and project context.
-- Detect missing information and request clarification when required.
+The earlier view assumed a more general-purpose cloud deployment. The settled model is more explicit:
 
-Output: a normalized task model with scope, constraints, and required approvals.
+- the orchestrator runs as a long-lived service,
+- workflow state and task metadata live in persistent stores,
+- queue and scheduling services handle task fan-out,
+- bounded services and workloads support repository context gathering and PR production,
+- GitHub-native CI runs repository checks in response to GitHub events; successful PR checks are required for merge and are not commands launched by LangGraph,
+- worker pools are separated by function, not collapsed into one generic execution namespace,
+- runtime access is scoped by repository, environment, and policy.
 
-### Node 2: Context assembly
+The result is a platform architecture where the graph is the control plane and Kubernetes is the execution substrate. The model is not “one big agent pod.” It is a set of coordinated services with distinct responsibilities and access boundaries.
+The result is a platform architecture where the graph is the control plane and Kubernetes supports isolated platform workloads. This does not grant LangGraph or its workers broad command-execution permission.
 
-- Read issue and repo docs.
-- Search for implementation hotspots.
-- Inspect recent commits, open PRs, and related tests.
-- Build a concise context package for planning.
+## 3. Runtime architecture
 
-Output: a repository brief and candidate implementation plan.
+The platform can be reasoned about as four layers:
 
-### Node 3: Planner
+1. Event and intake layer
+   - GitHub issue events, project updates, PR events, and task creation sources
+   - canonical task creation and routing logic
+   - backlog and queueing for work submission
+
+2. Orchestration layer
+   - LangGraph workflow state machine
+   - task lifecycle management
+   - branching, retries, and risk-policy controls
+   - evidence collection for traceability
+
+3. PR production layer
+   - bounded repository context and patch preparation
+   - PR creation and update operations
+   - GitHub-native CI result intake for the required PR merge gate
+
+4. Platform services and control plane
+   - secrets and identity management
+   - Kubernetes scheduling and runtime isolation
+   - monitoring, logs, and trace correlation
+   - audit records and state persistence
+
+A simplified task flow is:
+GitHub-native CI runs configured checks only in response to the relevant GitHub events; LangGraph does not launch those commands. All PR CI checks must report success before merge; unavailable, pending, errored, or failed checks block merge.
+
+Human sets GitHub Project task to ready -> GitHub event triggers CI/workflow intake -> LangGraph produces PR -> GitHub-native CI reports successful PR checks -> human merges PR -> successful merge automatically sets task to done
+
+## 4. Workflow structure
+
+The graph should be explicit and bounded. The platform should not rely on one unrestricted “agent loop.” Instead, a typical workflow runs as a structured set of states.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Human
+    participant Project as GitHub Project
+    participant Intake as CI/workflow intake
+    participant Graph as LangGraph orchestrator
+   participant Workers as Bounded PR production tools
+    participant GitHub as GitHub
+
+    Note over Project: App supports multi-orgs & selected repos
+
+    Human->>Project: Set task status to ready
+    Project-->>Intake: Status transition triggers intake
+   Note over Intake,GitHub: GitHub-native CI runs configured checks on GitHub events and LangGraph does not launch commands
+    Intake->>Graph: Start task workflow
+    
+    Note over Graph: Each task targets exactly one repository
+    
+    Graph->>Workers: Orchestrate bounded task execution
+   Graph->>Workers: Prepare bounded repository changes
+   Workers->>GitHub: Open PR
+   GitHub-->>Graph: Report PR CI results
+    GitHub-->>Human: PR is available for review
+    
+   Note over Human: Double-check PR risk summary, and merge only after all PR CI checks succeed
+
+   Note over GitHub: Pending, unavailable, errored, or failed checks block merge, with no override
+   Note over Workers: PR-producing authority cannot merge or change target branch
+
+    Human->>GitHub: Merge PR
+    GitHub-->>Project: Successful merge event
+    Project->>Project: Automatically set task status to done
+```
+
+### 4.1 Intake and normalization
+
+- A human sets the GitHub Project task status to `ready`; that status transition triggers CI/workflow intake.
+- Parse issue text, acceptance criteria, labels, and repository hints.
+- Determine scope, risk, and requested outcome.
+- Identify all repository-defined PR checks and how their results are reported; missing or unavailable results must not be treated as success.
+- Detect missing data. As an optional nice-to-have, when an issue is too imprecise to proceed, the intake workflow may identify and structure a focused clarification question, post it as a comment on the GitHub issue, record the request and response in the task audit trail, and pause intake until a response arrives. Intake then resumes and passes the clarified task to LangGraph for PR production.
+- Treat clarification as exceptional, not as a routine approval checkpoint. The standard human interactions remain setting the task to `ready` and merging the PR. Any task-status behavior or response timeout for clarification is unspecified.
+
+The output is a normalized task definition with an initial risk assessment and execution constraints. The exact risk scoring or classification method is unspecified.
+
+### 4.2 Context and repo assembly
+
+- Identify the task's single target repository and relevant code paths within it.
+- Gather issue history, prior PRs, related tests, and ownership metadata.
+- Build a minimal context package for planning.
+
+This stage reduces the chance of wrong patch generation by grounding the execution in the actual repo structure.
+
+### 4.3 Planning and decomposition
 
 - Convert the issue into a concrete engineering plan.
-- Decompose work into testable steps.
-- Identify risks, assumptions, and required API or schema changes.
+- Break the task into implementable steps.
+- Identify assumptions, unknowns, and validation plan.
 
-This node should use a strongly constrained prompt and structured output schema instead of freeform text.
+The plan should be structured and machine-readable so the graph can route work, apply risk-policy controls, and decide which workers are needed.
 
-### Node 4: Safe code execution
+### 4.4 Execution
 
-- Create a feature branch if the workflow is approved.
-- Generate or modify code according to the plan.
-- Keep patches small and scoped.
-- Prefer localized edits and preserve style conventions.
+- Prepare a focused patch and create or update a PR using bounded repository and GitHub operations.
+- Do not run or invoke external commands, including shell commands or child processes.
 
-Output: diff and rationale, plus a patch summary for review.
+This stage is limited to producing a PR and must be bound by the task plan, not open-ended model autonomy.
 
-### Node 5: Validation gate
+### 4.5 Validation gate
 
-- Run targeted linting, unit tests, integration checks, and build validation.
-- Capture pass/fail status and logs.
-- If validation fails, route back to a repair node with the exact failure output.
+- GitHub-native CI may run repository-configured checks when triggered by repository or project events. This is distinct from a command launched by LangGraph, which is not permitted.
+- Record PR CI results from GitHub; do not assume broad worker command-execution permission.
+- Every GitHub-native CI check for the PR must report success before merge. Pending, unavailable, errored, or failed checks block merge, and no human override is permitted.
+- If a check fails or errors, route back to a repair or replanning node with the available details. Do not treat validation evidence alone, or the absence of a result, as permission to merge.
 
-This is a critical safety gate: no merge or close-out should happen without successful checks.
+The task cannot reach `done` through its PR unless that PR is merged, and the PR cannot be merged until all its CI checks report success.
 
-### Node 6: Human review checkpoint
+### 4.6 Risk safeguards
 
-For higher-risk issues, pause before final submission and ask for approval. Examples:
+LangGraph may propose a patch and produce a PR, but it cannot merge the PR or directly change the target branch. This limits automation authority, not the potential impact of the proposed patch. The PR must surface a risk summary so the human can double-check potential impacts before deciding whether to merge. The human merge is the authorization and completion gate, and all PR CI checks must succeed first; this is a hard requirement, not a human-override gate. No separate routine or high-risk human approval gate is defined. The exact risk scoring or classification method remains unspecified.
 
-- security-sensitive code
-- database migrations
-- new external dependencies
-- changes touching auth, billing, or infrastructure
+### 4.7 Documentation maintenance
 
-The checkpoint should present a summary of changes and validation evidence.
+After a major design decision is resolved and confirmed, route the confirmed decision to the documentation worker. The worker refreshes the architecture documentation and relevant README summary, records a concise change summary and open questions, and the task is marked documented before completion.
 
-### Node 7: PR / issue completion
+### 4.8 Completion and reporting
 
-- Open or update pull request.
-- Attach validation logs and summary.
-- Mark project status or issue state based on policy.
-- Record final outputs in the issue thread.
+- Open or update the PR on GitHub with a risk summary of potential impacts, and record its GitHub-native CI results.
+- A human may merge the PR only after all PR CI checks report success; successful merge automatically sets the GitHub Project task to `done`.
+- Record the final state and any follow-up recommendations.
 
-## 6. Kubernetes deployment considerations
+The platform should preserve an audit trail so the result is reviewable later.
 
-### Runtime model
+### 4.9 Optional PR revision workflow (unsettled)
 
-Use Kubernetes workloads that are purpose-built for the workflow lifecycle:
+As an optional, unsettled capability outside the core task lifecycle, a PR may be created or kept as a draft while work is in progress. A human could leave a focused comment requesting a specific code modification; only a comment that follows an explicit, bounded request convention may trigger code changes. The exact marker or authorization convention is not decided, and ordinary PR comments must not be treated as change requests. An appropriate PR-comment event could route the request to LangGraph and bounded workers, which would update the same PR branch and produce a revised PR. GitHub-native CI would run again for the revision, and all required checks must succeed before merge. LangGraph cannot run external commands or merge the PR.
 
-- long-lived API service for orchestrator and webhook handling
-- stateless workers for tool execution
-- short-lived jobs for validation and builds
-- persistent storage for state, logs, and artifact retention
+Open design details include who or what transitions a draft PR to ready for review, and how that transition and any comment-driven revisions interact with the existing human lifecycle of setting the task to `ready` and merging the PR.
 
-### Recommended resources
+### 4.10 Custom GitHub App assignment-trigger hypothesis (under evaluation)
 
-- Namespace separation per environment: dev, staging, prod.
-- Dedicated service accounts for the orchestrator, worker pools, and GitHub integration.
-- Horizontal Pod Autoscaling for orchestrator and worker pools.
-- Jobs and cron tasks for retries, queue drains, and stale state cleanup.
-- Persistent volumes or managed data services for state and artifact storage.
+#### Hypothesis only
 
-### Deployment patterns
+A custom GitHub App bot integrated with a target repository may become part of the task flow. One possible alternative intake trigger is a human assigning a GitHub issue to the App bot identity. This is a hypothesis, not an accepted architecture decision. Until a proof of concept (POC) is completed, evaluated, and explicitly approved, the current baseline remains unchanged: a human sets the GitHub Project task to `ready` to trigger CI/workflow intake. Assignment to a bot does not currently trigger the documented flow.
 
-- Use a Deployment for the LangGraph API service.
-- Use Job or CronJob patterns for validation tasks and periodic cleanup.
-- Use a separate worker pool for compute-intensive tasks like repository indexing or test execution.
-- Place ingress behind authentication and rate limiting.
+#### POC questions and acceptance criteria
 
-### Failure handling
+The POC must use the intended GitHub App installation and target repository, and report evidence for each question:
 
-- Retries should be limited and policy-aware; repeated failures should surface to operators.
-- Use backoff and bounded execution timeouts.
-- Persist graph state before and after each node so the workflow can resume cleanly.
+- Can a human assign an issue to the actual GitHub App bot identity in the target repository? Record any repository or organization prerequisites and the identity shown on the issue.
+- Does the `issues.assigned` webhook arrive for that assignment through the intended App installation, with enough information to identify the repository, issue, and assignee reliably?
+- What is the least-privilege permission set needed to observe the assignment, read required issue context, and produce a PR? Verify the required grants in the POC; do not assume broad repository or organization permissions.
+- Can a constrained App produce a PR for the task using bounded GitHub operations without LangGraph invoking external commands? Record the App's effective authority and confirm that it cannot merge the PR or directly change the target branch.
+- Does the resulting PR continue through GitHub-native CI, with every required check reporting success as a merge prerequisite and a human as the only actor authorized to merge?
 
-## 7. Security
+The POC is complete only when these questions have documented results, including failures, limitations, and the permissions actually required. The result informs whether the App integration and assignment trigger should be proposed for inclusion in the flow; it does not itself change the architecture.
 
-Security is the deciding factor for whether this architecture is operationally acceptable.
+#### Settled decisions that remain in force
 
-### Identity and access
+This evaluation does not revise the settled `ready`-trigger baseline. It also does not change the existing requirements that LangGraph must not run or invoke external commands, GitHub-native PR checks must all succeed before merge, and only a human may merge a PR. Any future inclusion of the App integration or assignment trigger requires a separate explicit decision after the POC is evaluated.
 
-- Use a GitHub App with least-privilege repository permissions.
-- Prefer short-lived credentials through OIDC or a federated identity model.
-- Use separate service accounts for orchestration, code generation, and validation.
-- Avoid storing long-lived secrets in config maps or plaintext manifests.
+## 5. Security and governance
 
-### Runtime isolation
+The platform’s trust model depends on explicit guardrails.
 
-- Run code execution inside sandboxed containers or separate namespaces.
-- Prevent pod-to-pod access by default via network policies.
-- Limit egress to trusted package registries, GitHub APIs, and required internal services.
-- Do not allow agent containers direct access to cluster-admin credentials.
+### 5.1 Identity and repository boundaries
 
-### Repository safety
+- Use granular GitHub App permissions minimized to the minimum necessary for the defined PR workflow and task context; do not grant excessive access.
+- GitHub App installation and grants of selected-repository access across organizations are managed by GitHub's native organization and repository administration. The platform consumes the access granted to the App; it does not independently authorize organization installation or grant repository access.
+- Separate service accounts for orchestration, execution, and validation.
+- Treat GitHub App credentials as operationally sensitive and rotate them according to policy.
 
-- Enforce branch protection rules for PRs.
-- Require all target branches to pass required checks before merge.
-- Restrict automated merges to explicitly approved workflows.
-- Keep the agent within a dedicated fork or ephemeral workspace whenever possible.
+### 5.2 Runtime isolation
 
-### Secret handling
+- Run bounded repository-context and PR-production workloads in isolated Kubernetes environments.
+- Default to network restrictions and least-privilege egress.
+- Do not infer broad command-execution permission for workers from the Kubernetes execution model.
+- Protect the cluster from direct worker access to privileged credentials.
 
-- Use Kubernetes Secrets or a secret manager with rotation.
-- Keep environment variables scoped to the smallest required boundary.
-- Do not expose token payloads in logs or traces.
+### 5.3 Human authorization and risk policy in practice
 
-## 8. Observability
+The workflow can produce a PR but cannot merge it or directly change the target branch; this limited authority does not imply that a proposed patch has no security, data, infrastructure, production, or customer-facing impact. The PR includes a risk summary for the human to double-check. The human decides whether to merge, but only after all PR CI checks report success; pending, unavailable, errored, or failed checks block merge without override. A successful merge authorizes completion and automatically sets the task to `done`. No separate routine or high-risk human approval gate is defined. The exact risk scoring or classification method remains unspecified.
 
-The system should be observable end-to-end so operators can debug both the workflow and the repository execution quality.
+### 5.4 Auditability
 
-### Metrics
+Every task should produce:
+
+- a task record,
+- graph state transitions,
+- tool call inputs and outputs,
+- available GitHub-native CI results and validation evidence,
+- the PR risk summary and identified potential impacts,
+- PR and merge events, including the resulting project status.
+
+This ensures the platform remains inspectable even when work is largely automated.
+
+## 6. Kubernetes deployment model
+
+The deployment model is intentionally modular.
+
+### 6.1 Core components
+
+- orchestrator service: long-lived LangGraph API / control service,
+- task queue: durable queue for task intake and fan-out,
+- bounded workers: repository context, patch preparation, and PR production,
+- GitHub-native CI: repository checks triggered by GitHub events, required to succeed before PR merge and independent of LangGraph command execution,
+- data services: state storage, logs, traces, and artifact retention,
+- ingress and auth layer: secure, rate-limited entrypoints.
+
+### 6.2 Resource and lifecycle boundaries
+
+- Keep the orchestration service stateless or minimally stateful with durable workflow backend support.
+- Keep PR-production workloads bounded and separate from the stable control plane.
+- Segment worker pools by capability and risk profile.
+- Keep bursty workloads separate from the stable control plane.
+
+### 6.3 Failure and recovery model
+
+The platform should support resumable graph state and bounded retries. Failures are expected, but they should be isolated and visible:
+
+- workflow state is persisted after each stage,
+- retries are limited and policy-aware,
+- PR-production tool failures may trigger a controlled retry or escalation,
+- persistent errors surface with enough context for operators to intervene.
+
+## 7. Observability and operations
+
+The platform should be observable across task intake, model routing, PR production, GitHub-native CI results, PR activity, and task status transitions.
 
 Track:
 
-- issue intake count
-- workflow start/complete rates
-- task duration by node
-- validation pass/fail counts
-- retry counts
-- queue depth and lag
-- API latency for issue and PR updates
+- tasks received by repo and type,
+- routing decisions by model and role,
+- worker runtime and queue latency,
+- PR-production runtime and queue latency,
+- reported GitHub-native CI pass/fail results,
+- retry counts and failure modes,
+- ready-to-done task lifecycle outcomes.
 
-### Logging
+This is essential to understand whether the system is optimizing for throughput, correctness, or safety, and to detect drift in tool or model behavior over time.
 
-- Structured logs per workflow run and node execution
-- Correlation IDs and issue IDs in every record
-- Record prompts, tool calls, and resulting diffs in a replayable format
+## 8. Recommendation
 
-### Tracing
+The correct architecture is not a monolithic coding agent. It is a managed multi-repo task platform with a disciplined LangGraph orchestration layer limited to PR production, bounded supporting workers, explicit model-to-role routing, GitHub-native CI triggered by GitHub events and required to succeed before PR merge, human authorization through PR merge, and potential risks summarized in each PR for human review.
 
-Use distributed tracing across webhook ingestion, graph execution, tool calls, and validation jobs. This helps answer questions like:
+In practice, this gives us the right balance:
 
-- which node failed?
-- what input triggered the failed tool call?
-- how long did validation take?
-- what code changed between retries?
+- automation for routine engineering work,
+- human review of surfaced risks before merge,
+- traceability for every task,
+- scalability across repositories and teams,
+- operational safety through Kubernetes isolation and policy enforcement.
 
-### Dashboards and alerts
-
-- Workflow success/failure dashboard
-- Validation health dashboard
-- Repository-specific trend report
-- Alerts for queue buildup, repeated task failures, or suspicious execution patterns
-
-## 9. Phased implementation plan
-
-### Phase 0: Design and guardrails
-
-- Define issue taxonomy and required workflow states.
-- Select the GitHub integration model.
-- Decide repository scope and approval policy.
-- Define minimal tool contracts and validation gates.
-
-### Phase 1: Single-issue pipeline
-
-- Build a minimal LangGraph graph for issue intake, context fetch, patch generation, and validation.
-- Run against a single repo in a sandbox environment.
-- Capture state persistence and retry behavior.
-- Add structured logging and workflow-level metrics.
-
-### Phase 2: Kubernetes runtime and isolation
-
-- Package the orchestrator and workers as Kubernetes deployments and jobs.
-- Add service accounts, secrets, network policies, and resource limits.
-- Run validation jobs in isolated pods with bounded permissions.
-- Add artifact retention and tracing.
-
-### Phase 3: Human-in-the-loop governance
-
-- Add approval checkpoints for high-risk changes.
-- Require issue summary and validation evidence for final close-out.
-- Add a review dashboard for operators and engineering leads.
-
-### Phase 4: Production hardening and scale
-
-- Add multi-repo workflows, concurrency controls, and queue-based scaling.
-- Introduce advanced observability, alerting, and cost controls.
-- Add replay and audit tooling for all workflow executions.
-- Run broader validation and incident response exercises.
-
-## 10. Recommendation
-
-The right architecture is not “one big agent that does everything.” It is a bounded, stateful LangGraph workflow running on Kubernetes with explicit checkpoints, narrow permissions, and strong validation. That structure makes the system trustworthy enough to support real GitHub Project issue execution while still allowing the autonomy needed for routine development tasks.
-
-If implemented carefully, this approach gives engineering teams a repeatable path from issue to validated patch without sacrificing safety, insight, or control.
+This model is consistent with the platform decisions we settled on and is the one best suited to real-world GitHub issue execution at scale.
