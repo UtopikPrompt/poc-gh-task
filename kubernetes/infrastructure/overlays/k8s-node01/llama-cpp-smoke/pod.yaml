@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama-cpp-gpu-smoke
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: llama-cpp-gpu-smoke
+    app.kubernetes.io/part-of: inference-model-storage-smoke
+spec:
+  activeDeadlineSeconds: 900
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/hostname: k8s-node01
+  containers:
+  - name: llama-server
+    image: ghcr.io/ggml-org/llama.cpp@sha256:c1d664830580e1651c1cc8d3bbc161af474800a56a83226e6e22f94bb8ba1c59
+    imagePullPolicy: IfNotPresent
+    args:
+    - --verbose
+    - -m
+    - /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+    - --n-gpu-layers
+    - "99"
+    - --ctx-size
+    - "512"
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8080"
+    ports:
+    - name: http
+      containerPort: 8080
+      protocol: TCP
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: http
+      periodSeconds: 5
+      timeoutSeconds: 2
+      failureThreshold: 120
+    resources:
+      requests:
+        nvidia.com/gpu: "1"
+      limits:
+        nvidia.com/gpu: "1"
+    volumeMounts:
+    - name: model-artifacts
+      mountPath: /models
+      readOnly: true
+  volumes:
+  - name: model-artifacts
+    persistentVolumeClaim:
+      claimName: inference-model-artifacts
