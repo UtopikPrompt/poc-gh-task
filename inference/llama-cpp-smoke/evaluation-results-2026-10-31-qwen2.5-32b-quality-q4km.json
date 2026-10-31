@@ -1,0 +1,1716 @@
+{
+  "base_url": "http://10.43.125.168:8080",
+  "context_limit": 4096,
+  "created_at_utc": "2026-10-31T23:13:26.064552+00:00",
+  "evaluation": {
+    "automated_passes": 3,
+    "automated_total": 6,
+    "cases": [
+      {
+        "expected": {
+          "deadline": "2026-11-04 16:30 UTC",
+          "owner": "Leena Rao",
+          "project": "Cedar-17"
+        },
+        "id": "faithful-extraction",
+        "input_tokens_tokenize_endpoint": 80,
+        "objective_check": {
+          "observed": {
+            "deadline": "2026-11-04 16:30 UTC",
+            "owner": "Leena Rao",
+            "project": "Cedar-17"
+          },
+          "passed": true
+        },
+        "prompt": "<|im_start|>system\nReturn only valid JSON with the requested keys and source values.<|im_end|>\n<|im_start|>user\nExtract project, owner, and deadline from this note. Do not infer missing details.\nNote: Project Cedar-17 is owned by Leena Rao; the handoff deadline is 2026-11-04 16:30 UTC.<|im_end|>\n<|im_start|>assistant\n",
+        "request": {
+          "chat_format": "explicit Qwen2.5-Instruct template",
+          "max_tokens": 120,
+          "seed": 42,
+          "temperature": 0.0
+        },
+        "response": {
+          "client_ms": 8660.6,
+          "ok": true,
+          "stop_type": "eos",
+          "text": "{\n  \"project\": \"Cedar-17\",\n  \"owner\": \"Leena Rao\",\n  \"deadline\": \"2026-11-04 16:30 UTC\"\n}",
+          "timings": {
+            "cache_n": 0,
+            "predicted_ms": 4282.937,
+            "predicted_n": 46,
+            "predicted_per_second": 10.506808762304933,
+            "predicted_per_token_ms": 95.17637777777777,
+            "prompt_ms": 4374.138,
+            "prompt_n": 80,
+            "prompt_per_second": 18.289317803873587,
+            "prompt_per_token_ms": 54.676725
+          },
+          "tokens_evaluated": 80,
+          "tokens_generated": 46
+        },
+        "rubric": "JSON parses and all three extracted values exactly match the note.",
+        "system": "Return only valid JSON with the requested keys and source values.",
+        "user": "Extract project, owner, and deadline from this note. Do not infer missing details.\nNote: Project Cedar-17 is owned by Leena Rao; the handoff deadline is 2026-11-04 16:30 UTC."
+      },
+      {
+        "expected": [
+          "larch-3",
+          "15:20",
+          "48",
+          "friday",
+          "customer data"
+        ],
+        "id": "concise-summary",
+        "input_tokens_tokenize_endpoint": 83,
+        "objective_check": {
+          "facts_found": [
+            "larch-3",
+            "15:20",
+            "friday",
+            "customer data"
+          ],
+          "passed": false,
+          "word_count": 19
+        },
+        "prompt": "<|im_start|>system\nSummarize faithfully and concisely.<|im_end|>\n<|im_start|>user\nSummarize this update in one sentence of at most 25 words, preserving the key facts.\nThe Larch-3 migration finished at 15:20 UTC. All 48 services passed checks. The old cluster remains available until Friday for rollback. No customer data was changed.<|im_end|>\n<|im_start|>assistant\n",
+        "request": {
+          "chat_format": "explicit Qwen2.5-Instruct template",
+          "max_tokens": 120,
+          "seed": 42,
+          "temperature": 0.0
+        },
+        "response": {
+          "client_ms": 3472.6,
+          "ok": true,
+          "stop_type": "eos",
+          "text": "Larch-3 migration completed successfully at 15:20 UTC; all services checked, old cluster standby until Friday, no customer data altered.",
+          "timings": {
+            "cache_n": 0,
+            "predicted_ms": 2949.679,
+            "predicted_n": 32,
+            "predicted_per_second": 10.509618165230862,
+            "predicted_per_token_ms": 95.15093548387097,
+            "prompt_ms": 488.789,
+            "prompt_n": 83,
+            "prompt_per_second": 169.8074220164529,
+            "prompt_per_token_ms": 5.889024096385542
+          },
+          "tokens_evaluated": 83,
+          "tokens_generated": 32
+        },
+        "rubric": "One sentence, at most 25 words, includes the migration, time, 48 services, rollback window, and unchanged customer data.",
+        "system": "Summarize faithfully and concisely.",
+        "user": "Summarize this update in one sentence of at most 25 words, preserving the key facts.\nThe Larch-3 migration finished at 15:20 UTC. All 48 services passed checks. The old cluster remains available until Friday for rollback. No customer data was changed."
+      },
+      {
+        "expected": [
+          "5040.00",
+          "5443.20"
+        ],
+        "id": "arithmetic-reasoning",
+        "input_tokens_tokenize_endpoint": 63,
+        "objective_check": {
+          "passed": false,
+          "values_found": []
+        },
+        "prompt": "<|im_start|>system\nCalculate carefully. State the final amount clearly.<|im_end|>\n<|im_start|>user\nA lab buys 320 units at $18 each. Apply a 12.5% discount, then 8% sales tax to the discounted subtotal. What is the final total?<|im_end|>\n<|im_start|>assistant\n",
+        "request": {
+          "chat_format": "explicit Qwen2.5-Instruct template",
+          "max_tokens": 120,
+          "seed": 42,
+          "temperature": 0.0
+        },
+        "response": {
+          "client_ms": 11707.5,
+          "ok": true,
+          "stop_type": "limit",
+          "text": "To calculate the final total, we need to follow these steps:\n\n1. Calculate the initial total cost without any discount or tax.\n2. Apply the 12.5% discount to the initial total cost.\n3. Apply the 8% sales tax to the discounted total.\n4. Calculate the final total.\n\nLet's start with the initial total cost:\n\n1. Initial total cost:\n\\[ 320 \\text{ units} \\times \\$18 \\text{ per unit} = \\$5760 \\]\n\n2. Apply the 12.5% discount:\n",
+          "timings": {
+            "cache_n": 0,
+            "predicted_ms": 11316.298,
+            "predicted_n": 120,
+            "predicted_per_second": 10.51580649431466,
+            "predicted_per_token_ms": 95.0949411764706,
+            "prompt_ms": 360.14,
+            "prompt_n": 63,
+            "prompt_per_second": 174.93197090020547,
+            "prompt_per_token_ms": 5.716507936507936
+          },
+          "tokens_evaluated": 63,
+          "tokens_generated": 120
+        },
+        "rubric": "Discounted subtotal is $5,040.00 and final total is $5,443.20.",
+        "system": "Calculate carefully. State the final amount clearly.",
+        "user": "A lab buys 320 units at $18 each. Apply a 12.5% discount, then 8% sales tax to the discounted subtotal. What is the final total?"
+      },
+      {
+        "expected": [
+          "A: blue",
+          "B: 14",
+          "C: no"
+        ],
+        "id": "instruction-following",
+        "input_tokens_tokenize_endpoint": 66,
+        "objective_check": {
+          "observed_lines": [
+            "a: blue",
+            "b is 14.",
+            "c is false."
+          ],
+          "passed": false
+        },
+        "prompt": "<|im_start|>system\nFollow output constraints exactly.<|im_end|>\n<|im_start|>user\nReturn exactly three lines, with no introduction or extra text, in this format: A: ...\nA is the color of a clear daytime sky. B is 9 + 5. C answers whether 2 is greater than 7.<|im_end|>\n<|im_start|>assistant\n",
+        "request": {
+          "chat_format": "explicit Qwen2.5-Instruct template",
+          "max_tokens": 120,
+          "seed": 42,
+          "temperature": 0.0
+        },
+        "response": {
+          "client_ms": 1817.7,
+          "ok": true,
+          "stop_type": "eos",
+          "text": "A: blue\nB is 14.\nC is false.",
+          "timings": {
+            "cache_n": 0,
+            "predicted_ms": 1332.713,
+            "predicted_n": 15,
+            "predicted_per_second": 10.504887398862321,
+            "predicted_per_token_ms": 95.19378571428571,
+            "prompt_ms": 438.637,
+            "prompt_n": 66,
+            "prompt_per_second": 150.46610295073145,
+            "prompt_per_token_ms": 6.646015151515152
+          },
+          "tokens_evaluated": 66,
+          "tokens_generated": 15
+        },
+        "rubric": "Exactly three lines and exact labels/answers: A: blue; B: 14; C: no.",
+        "system": "Follow output constraints exactly.",
+        "user": "Return exactly three lines, with no introduction or extra text, in this format: A: ...\nA is the color of a clear daytime sky. B is 9 + 5. C answers whether 2 is greater than 7."
+      },
+      {
+        "expected": {
+          "minimum_score": 70,
+          "returned_names": [
+            "Mina",
+            "Omar"
+          ]
+        },
+        "id": "code-explanation",
+        "input_tokens_tokenize_endpoint": 88,
+        "objective_check": {
+          "passed": true,
+          "returned_names_exact": true,
+          "threshold_explained": true
+        },
+        "prompt": "<|im_start|>system\nExplain the code accurately and briefly.<|im_end|>\n<|im_start|>user\nExplain what this function returns and what condition it applies.\n```python\ndef passed(results):\n    return [name for name, score in results if score >= 70]\n```\nFor [('Mina', 70), ('Nia', 69), ('Omar', 91)], what is returned?<|im_end|>\n<|im_start|>assistant\n",
+        "request": {
+          "chat_format": "explicit Qwen2.5-Instruct template",
+          "max_tokens": 120,
+          "seed": 42,
+          "temperature": 0.0
+        },
+        "response": {
+          "client_ms": 11826.0,
+          "ok": true,
+          "stop_type": "limit",
+          "text": "The function `passed` takes a single argument `results`, which is expected to be a list of tuples. Each tuple contains a student's name and their score. The function returns a list of names for students whose scores are 70 or above.\n\nFor the input `[('Mina', 70), ('Nia', 69), ('Omar', 91)]`, the function will return `['Mina', 'Omar']` because 'Mina' and 'Omar' have scores of 70 and 91, respectively, which meet or",
+          "timings": {
+            "cache_n": 0,
+            "predicted_ms": 11313.566,
+            "predicted_n": 120,
+            "predicted_per_second": 10.518345851343422,
+            "predicted_per_token_ms": 95.07198319327732,
+            "prompt_ms": 490.295,
+            "prompt_n": 88,
+            "prompt_per_second": 179.48378017316105,
+            "prompt_per_token_ms": 5.571534090909091
+          },
+          "tokens_evaluated": 88,
+          "tokens_generated": 120
+        },
+        "rubric": "Explains the inclusive score threshold and returns Mina and Omar, excluding Nia.",
+        "system": "Explain the code accurately and briefly.",
+        "user": "Explain what this function returns and what condition it applies.\n```python\ndef passed(results):\n    return [name for name, score in results if score >= 70]\n```\nFor [('Mina', 70), ('Nia', 69), ('Omar', 91)], what is returned?"
+      },
+      {
+        "expected": [
+          "cobalt-2",
+          "71",
+          "63",
+          "no leak"
+        ],
+        "id": "source-grounded-facts",
+        "input_tokens_tokenize_endpoint": 71,
+        "objective_check": {
+          "facts_found": [
+            "cobalt-2",
+            "71",
+            "63",
+            "no leak"
+          ],
+          "passed": true
+        },
+        "prompt": "<|im_start|>system\nAnswer only from the provided report; be concise.<|im_end|>\n<|im_start|>user\nIn one sentence, report the tested unit, run duration, peak temperature, and leak result.\nReport: Unit Cobalt-2 ran for 71 minutes. Its peak temperature was 63 degrees Celsius. Inspection found no leak.<|im_end|>\n<|im_start|>assistant\n",
+        "request": {
+          "chat_format": "explicit Qwen2.5-Instruct template",
+          "max_tokens": 120,
+          "seed": 42,
+          "temperature": 0.0
+        },
+        "response": {
+          "client_ms": 3259.3,
+          "ok": true,
+          "stop_type": "eos",
+          "text": "Unit Cobalt-2 ran for 71 minutes, reached a peak temperature of 63 degrees Celsius, and had no leak detected.",
+          "timings": {
+            "cache_n": 0,
+            "predicted_ms": 2760.625,
+            "predicted_n": 30,
+            "predicted_per_second": 10.504867557165497,
+            "predicted_per_token_ms": 95.19396551724138,
+            "prompt_ms": 441.681,
+            "prompt_n": 71,
+            "prompt_per_second": 160.74950020489902,
+            "prompt_per_token_ms": 6.2208591549295775
+          },
+          "tokens_evaluated": 71,
+          "tokens_generated": 30
+        },
+        "rubric": "Includes Cobalt-2, 71 minutes, 63 degrees Celsius, and no leak without contradicting the report.",
+        "system": "Answer only from the provided report; be concise.",
+        "user": "In one sentence, report the tested unit, run duration, peak temperature, and leak result.\nReport: Unit Cobalt-2 ran for 71 minutes. Its peak temperature was 63 degrees Celsius. Inspection found no leak."
+      }
+    ],
+    "human_scoring": "Not performed; review raw outputs using the per-task rubric.",
+    "profile": "q4-one-gpu-4k"
+  },
+  "final_state": {
+    "health": {
+      "status": "ok"
+    },
+    "pods": [
+      {
+        "name": "llama-cpp-server-7f6866b6d4-5tfsj",
+        "phase": "Running",
+        "restarts": 0
+      }
+    ],
+    "props": {
+      "model_alias": "/models/qwen2.5-32b-instruct-q4_k_m.gguf",
+      "model_ftype": "Q4_K - Medium",
+      "model_path": "/models/qwen2.5-32b-instruct-q4_k_m.gguf",
+      "n_ctx": 4096,
+      "total_slots": 4
+    },
+    "slots": [
+      {
+        "id": 0,
+        "id_task": 218,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "n_prompt_tokens": 0,
+        "n_prompt_tokens_cache": 0,
+        "n_prompt_tokens_processed": 0,
+        "next_token": [
+          {
+            "has_new_line": false,
+            "has_next_token": false,
+            "n_decoded": 0,
+            "n_remain": -1
+          }
+        ],
+        "params": {
+          "adaptive_decay": 0.8999999761581421,
+          "adaptive_target": -1.0,
+          "backend_sampling": false,
+          "chat_format": "Content-only",
+          "dry_allowed_length": 2,
+          "dry_base": 1.75,
+          "dry_multiplier": 0.0,
+          "dry_penalty_last_n": 64,
+          "dynatemp_exponent": 1.0,
+          "dynatemp_range": 0.0,
+          "frequency_penalty": 0.0,
+          "generation_prompt": "",
+          "ignore_eos": false,
+          "lora": [],
+          "max_tokens": 120,
+          "min_keep": 0,
+          "min_p": 0.05000000074505806,
+          "mirostat": 0,
+          "mirostat_eta": 0.10000000149011612,
+          "mirostat_tau": 5.0,
+          "n_discard": 0,
+          "n_keep": 0,
+          "n_predict": 120,
+          "n_probs": 0,
+          "post_sampling_probs": false,
+          "presence_penalty": 0.0,
+          "reasoning_format": "deepseek",
+          "reasoning_in_content": false,
+          "repeat_last_n": 64,
+          "repeat_penalty": 1.0,
+          "samplers": [
+            "penalties",
+            "dry",
+            "top_n_sigma",
+            "top_k",
+            "typ_p",
+            "top_p",
+            "min_p",
+            "xtc",
+            "temperature"
+          ],
+          "seed": 42,
+          "speculative.types": "none",
+          "stream": false,
+          "temperature": 0.0,
+          "timings_per_token": false,
+          "top_k": 40,
+          "top_n_sigma": -1.0,
+          "top_p": 0.949999988079071,
+          "typical_p": 1.0,
+          "xtc_probability": 0.0,
+          "xtc_threshold": 0.10000000149011612
+        },
+        "speculative": false
+      },
+      {
+        "id": 1,
+        "id_task": 339,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "n_prompt_tokens": 100,
+        "n_prompt_tokens_cache": 0,
+        "n_prompt_tokens_processed": 0,
+        "next_token": [
+          {
+            "has_new_line": false,
+            "has_next_token": false,
+            "n_decoded": 0,
+            "n_remain": -1
+          }
+        ],
+        "params": {
+          "adaptive_decay": 0.8999999761581421,
+          "adaptive_target": -1.0,
+          "backend_sampling": false,
+          "chat_format": "Content-only",
+          "dry_allowed_length": 2,
+          "dry_base": 1.75,
+          "dry_multiplier": 0.0,
+          "dry_penalty_last_n": 64,
+          "dynatemp_exponent": 1.0,
+          "dynatemp_range": 0.0,
+          "frequency_penalty": 0.0,
+          "generation_prompt": "",
+          "ignore_eos": false,
+          "lora": [],
+          "max_tokens": 120,
+          "min_keep": 0,
+          "min_p": 0.05000000074505806,
+          "mirostat": 0,
+          "mirostat_eta": 0.10000000149011612,
+          "mirostat_tau": 5.0,
+          "n_discard": 0,
+          "n_keep": 0,
+          "n_predict": 120,
+          "n_probs": 0,
+          "post_sampling_probs": false,
+          "presence_penalty": 0.0,
+          "reasoning_format": "deepseek",
+          "reasoning_in_content": false,
+          "repeat_last_n": 64,
+          "repeat_penalty": 1.0,
+          "samplers": [
+            "penalties",
+            "dry",
+            "top_n_sigma",
+            "top_k",
+            "typ_p",
+            "top_p",
+            "min_p",
+            "xtc",
+            "temperature"
+          ],
+          "seed": 42,
+          "speculative.types": "none",
+          "stream": false,
+          "temperature": 0.0,
+          "timings_per_token": false,
+          "top_k": 40,
+          "top_n_sigma": -1.0,
+          "top_p": 0.949999988079071,
+          "typical_p": 1.0,
+          "xtc_probability": 0.0,
+          "xtc_threshold": 0.10000000149011612
+        },
+        "speculative": false
+      },
+      {
+        "id": 2,
+        "id_task": 81,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "n_prompt_tokens": 0,
+        "n_prompt_tokens_cache": 0,
+        "n_prompt_tokens_processed": 0,
+        "next_token": [
+          {
+            "has_new_line": false,
+            "has_next_token": false,
+            "n_decoded": 0,
+            "n_remain": -1
+          }
+        ],
+        "params": {
+          "adaptive_decay": 0.8999999761581421,
+          "adaptive_target": -1.0,
+          "backend_sampling": false,
+          "chat_format": "Content-only",
+          "dry_allowed_length": 2,
+          "dry_base": 1.75,
+          "dry_multiplier": 0.0,
+          "dry_penalty_last_n": 64,
+          "dynatemp_exponent": 1.0,
+          "dynatemp_range": 0.0,
+          "frequency_penalty": 0.0,
+          "generation_prompt": "",
+          "ignore_eos": false,
+          "lora": [],
+          "max_tokens": 120,
+          "min_keep": 0,
+          "min_p": 0.05000000074505806,
+          "mirostat": 0,
+          "mirostat_eta": 0.10000000149011612,
+          "mirostat_tau": 5.0,
+          "n_discard": 0,
+          "n_keep": 0,
+          "n_predict": 120,
+          "n_probs": 0,
+          "post_sampling_probs": false,
+          "presence_penalty": 0.0,
+          "reasoning_format": "deepseek",
+          "reasoning_in_content": false,
+          "repeat_last_n": 64,
+          "repeat_penalty": 1.0,
+          "samplers": [
+            "penalties",
+            "dry",
+            "top_n_sigma",
+            "top_k",
+            "typ_p",
+            "top_p",
+            "min_p",
+            "xtc",
+            "temperature"
+          ],
+          "seed": 42,
+          "speculative.types": "none",
+          "stream": false,
+          "temperature": 0.0,
+          "timings_per_token": false,
+          "top_k": 40,
+          "top_n_sigma": -1.0,
+          "top_p": 0.949999988079071,
+          "typical_p": 1.0,
+          "xtc_probability": 0.0,
+          "xtc_threshold": 0.10000000149011612
+        },
+        "speculative": false
+      },
+      {
+        "id": 3,
+        "id_task": 202,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "n_prompt_tokens": 0,
+        "n_prompt_tokens_cache": 0,
+        "n_prompt_tokens_processed": 0,
+        "next_token": [
+          {
+            "has_new_line": false,
+            "has_next_token": false,
+            "n_decoded": 0,
+            "n_remain": -1
+          }
+        ],
+        "params": {
+          "adaptive_decay": 0.8999999761581421,
+          "adaptive_target": -1.0,
+          "backend_sampling": false,
+          "chat_format": "Content-only",
+          "dry_allowed_length": 2,
+          "dry_base": 1.75,
+          "dry_multiplier": 0.0,
+          "dry_penalty_last_n": 64,
+          "dynatemp_exponent": 1.0,
+          "dynatemp_range": 0.0,
+          "frequency_penalty": 0.0,
+          "generation_prompt": "",
+          "ignore_eos": false,
+          "lora": [],
+          "max_tokens": 120,
+          "min_keep": 0,
+          "min_p": 0.05000000074505806,
+          "mirostat": 0,
+          "mirostat_eta": 0.10000000149011612,
+          "mirostat_tau": 5.0,
+          "n_discard": 0,
+          "n_keep": 0,
+          "n_predict": 120,
+          "n_probs": 0,
+          "post_sampling_probs": false,
+          "presence_penalty": 0.0,
+          "reasoning_format": "deepseek",
+          "reasoning_in_content": false,
+          "repeat_last_n": 64,
+          "repeat_penalty": 1.0,
+          "samplers": [
+            "penalties",
+            "dry",
+            "top_n_sigma",
+            "top_k",
+            "typ_p",
+            "top_p",
+            "min_p",
+            "xtc",
+            "temperature"
+          ],
+          "seed": 42,
+          "speculative.types": "none",
+          "stream": false,
+          "temperature": 0.0,
+          "timings_per_token": false,
+          "top_k": 40,
+          "top_n_sigma": -1.0,
+          "top_p": 0.949999988079071,
+          "typical_p": 1.0,
+          "xtc_probability": 0.0,
+          "xtc_threshold": 0.10000000149011612
+        },
+        "speculative": false
+      }
+    ]
+  },
+  "gpu_samples": [
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:26.277541+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:26.277609+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:26.819124+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:26.819166+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:27.360328+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:27.360372+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:27.906460+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:27.906506+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:28.448995+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:28.449032+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:28.995017+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:28.995052+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:29.537963+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:29.537997+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:30.081434+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20057,
+      "time": "2026-10-31T23:13:30.081468+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:30.623128+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:30.623163+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:31.165616+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:31.165649+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:31.705935+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:31.705967+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:32.248024+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:32.248057+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:32.789200+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:32.789233+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:33.329916+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:33.329947+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:33.874040+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:33.874074+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:34.416576+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:34.416630+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:34.959128+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:34.959171+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:35.498702+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:35.498744+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:36.040565+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:36.040668+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:36.580362+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:36.580404+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:37.123040+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:37.123083+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:37.661759+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:37.661803+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:38.202404+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:38.202447+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:38.744131+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:38.744166+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:39.285654+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:39.285687+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:39.828304+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:39.828338+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:40.368643+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:40.368678+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:40.910961+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:40.910995+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:41.452618+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:41.452654+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:41.993056+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:41.993087+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:42.535119+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:42.535152+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:43.075315+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:43.075348+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:43.616404+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:43.616438+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:44.156971+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:44.157017+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:44.698929+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:44.698963+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:45.240027+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:45.240059+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:45.773056+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:45.773089+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:46.312826+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:46.312856+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:46.855199+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:46.855233+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:47.396424+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:47.396457+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:47.939073+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:47.939106+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:48.481711+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:48.481744+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:49.022042+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:49.022075+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:49.563942+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:49.563977+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:50.105750+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:50.105784+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:50.646830+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:50.646863+00:00",
+      "utilization_percent": 98,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:51.188492+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:51.188527+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:51.728773+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:51.728806+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:52.270297+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:52.270329+00:00",
+      "utilization_percent": 93,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:52.812669+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:52.812700+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:53.352631+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:53.352662+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:53.894808+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:53.894840+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:54.435536+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:54.435569+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:54.976969+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:54.977001+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:55.517820+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:55.517855+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:56.058871+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:56.058904+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:56.600307+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:56.600339+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:57.140116+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:57.140149+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:57.683809+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:57.683843+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:58.224275+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:58.224307+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:58.766072+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:58.766106+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:59.308162+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:59.308196+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:13:59.848516+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:13:59.848550+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:00.391317+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:00.391350+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:00.932875+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:00.932926+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:01.472760+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:01.472793+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:02.006604+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:02.006638+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:02.549265+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:02.549297+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:03.089620+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:03.089653+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:03.630365+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:03.630400+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:04.173793+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:04.173826+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:04.714895+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:04.714928+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:05.255992+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:05.256024+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:05.799508+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:05.799542+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:06.340433+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:06.340467+00:00",
+      "utilization_percent": 99,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    },
+    {
+      "gpu": 0,
+      "memory_used_mib": 151,
+      "time": "2026-10-31T23:14:06.881492+00:00",
+      "utilization_percent": 0,
+      "uuid": "GPU-f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d"
+    },
+    {
+      "gpu": 1,
+      "memory_used_mib": 20059,
+      "time": "2026-10-31T23:14:06.881525+00:00",
+      "utilization_percent": 100,
+      "uuid": "GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3"
+    }
+  ],
+  "initial_state": {
+    "health": {
+      "status": "ok"
+    },
+    "pods": [
+      {
+        "name": "llama-cpp-server-7f6866b6d4-5tfsj",
+        "phase": "Running",
+        "restarts": 0
+      }
+    ],
+    "props": {
+      "model_alias": "/models/qwen2.5-32b-instruct-q4_k_m.gguf",
+      "model_ftype": "Q4_K - Medium",
+      "model_path": "/models/qwen2.5-32b-instruct-q4_k_m.gguf",
+      "n_ctx": 4096,
+      "total_slots": 4
+    },
+    "slots": [
+      {
+        "id": 0,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "speculative": false
+      },
+      {
+        "id": 1,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "speculative": false
+      },
+      {
+        "id": 2,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "speculative": false
+      },
+      {
+        "id": 3,
+        "is_processing": false,
+        "n_ctx": 4096,
+        "speculative": false
+      }
+    ]
+  },
+  "mode": "quality",
+  "peak_gpu_memory_mib": {
+    "0": 151,
+    "1": 20059
+  },
+  "runtime": "llama.cpp b12019-1052f7e1d",
+  "timeout_seconds_per_request": 300.0
+}
