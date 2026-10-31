@@ -243,6 +243,8 @@ A custom GitHub App bot integrated with a target repository may become part of t
 
 #### POC questions and acceptance criteria
 
+See the [GitHub App bot POC proposal](github-app-bot-poc.md) for scoped stages, acceptance criteria, and an evidence template.
+
 The POC must use the intended GitHub App installation and target repository, and report evidence for each question:
 
 - Can a human assign an issue to the actual GitHub App bot identity in the target repository? Record any repository or organization prerequisites and the identity shown on the issue.
