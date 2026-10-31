@@ -229,11 +229,11 @@ After a major design decision is resolved and confirmed, route the confirmed dec
 
 The platform should preserve an audit trail so the result is reviewable later.
 
-### 4.9 Optional PR revision workflow (unsettled)
+### 4.9 Optional PR revision workflow (nice-to-have proposal, unsettled)
 
-As an optional, unsettled capability outside the core task lifecycle, a PR may be created or kept as a draft while work is in progress. A human could leave a focused comment requesting a specific code modification; only a comment that follows an explicit, bounded request convention may trigger code changes. The exact marker or authorization convention is not decided, and ordinary PR comments must not be treated as change requests. An appropriate PR-comment event could route the request to LangGraph and bounded workers, which would update the same PR branch and produce a revised PR. GitHub-native CI would run again for the revision, and all required checks must succeed before merge. LangGraph cannot run external commands or merge the PR.
+A GitHub PR conversation comment slash command, proposed as `/agent`, is a nice-to-have capability outside the core task lifecycle, not a workflow requirement or settled implementation decision. An explicit `/agent` request could ask for a bounded code modification. The app could route that request to LangGraph and bounded workers to revise the same PR branch. Ordinary PR comments must never implicitly trigger edits. GitHub-native CI must rerun for the revision, and all required checks must succeed before merge. LangGraph and its workers do not run external commands or merge the PR.
 
-Open design details include who or what transitions a draft PR to ready for review, and how that transition and any comment-driven revisions interact with the existing human lifecycle of setting the task to `ready` and merging the PR.
+The exact command syntax, including any arguments or request format beyond the proposed `/agent` command, is unresolved. The commenter authorization and permission threshold are also unresolved, as is who or what transitions a draft PR to ready for review. These details and any comment-driven revisions must not alter the primary `ready` -> PR -> successful CI -> human merge -> `done` flow.
 
 ### 4.10 Custom GitHub App assignment-trigger hypothesis (under evaluation)
 
@@ -311,8 +311,22 @@ The deployment model is intentionally modular.
 - Keep PR-production workloads bounded and separate from the stable control plane.
 - Segment worker pools by capability and risk profile.
 - Keep bursty workloads separate from the stable control plane.
+- For the current lab deployment on `k8s-node01`, the storage requirement is general platform data on SSD and inference model artifacts on NVMe. This is specific to the lab deployment, not a general requirement for inference deployments; storage choices depend on the target environment. This is a placement requirement, not a verified Kubernetes mapping: cluster inspection found no accessible PV, PVC, or StorageClass, and the previously referenced `pv/inference-models` has not been confirmed usable.
 
-### 6.3 Failure and recovery model
+### 6.3 llama.cpp inference deployment requirements (proposed)
+
+This is a design and operator-runbook requirement, not an implemented or tested deployment procedure. No Kubernetes manifests, verified storage mapping, or successful deployment results are asserted here. Deployment artifacts and the operator runbook must be kept in version control and shared through the repository and its branch; do not rely on undocumented, ad hoc node commands.
+
+Before deployment, the runbook and checked-in configuration must identify and verify:
+
+- The serving image by immutable digest, with its source/build provenance recorded. Verify that the image's CUDA build supports NVIDIA Pascal `sm_61` and the P40 before use; do not infer compatibility from a generic CUDA label.
+- The model artifact by immutable upstream revision and checksum, with its format, source and applicable license recorded, plus the required context-length and quantization settings.
+- For `k8s-node01`, the actual PV/PVC and workload mount mapping that places model artifacts on NVMe and ordinary platform storage on SSD. Confirm the node's available storage resources and the mapping, capacity, and access before deployment; do not invent resource names or filesystem paths. Other inference environments may use different storage arrangements.
+- One-time prerequisites and artifact/storage preparation, documented separately from application deployment. Record expected verification for preparation; keep runtime deployment declarative using checked-in Kubernetes manifests or the repository's established deployment convention so operators can reproduce it.
+
+For each deployment, record observed validation results rather than assumed success: GPU allocation and in-container visibility, successful model load, memory use and fit for the pinned model/settings, and service connectivity. Include the node/environment, image digest, model revision and checksum, actual storage resource/mount mapping, and pass/fail evidence. Commands and paths that have not been verified must not be presented as working instructions.
+
+### 6.4 Failure and recovery model
 
 The platform should support resumable graph state and bounded retries. Failures are expected, but they should be isolated and visible:
 

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-cpp-server
+  labels:
+    app.kubernetes.io/name: llama-cpp-server
+    app.kubernetes.io/part-of: inference-serving
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llama-cpp-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llama-cpp-server
+        app.kubernetes.io/part-of: inference-serving
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: llama-server
+        image: ghcr.io/ggml-org/llama.cpp@sha256:c1d664830580e1651c1cc8d3bbc161af474800a56a83226e6e22f94bb8ba1c59
+        imagePullPolicy: IfNotPresent
+        args:
+        - --verbose
+        - -m
+        - /models/model.gguf
+        - --n-gpu-layers
+        - all
+        - --ctx-size
+        - "2048"
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8080"
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
