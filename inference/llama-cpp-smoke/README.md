@@ -174,3 +174,69 @@ python3 inference/llama-cpp-smoke/benchmark.py \
 ```
 
 The original checked-in Kubernetes composition was reapplied after B. The GPU Deployment returned to one 0.5B Q4_K_M replica with two GPUs and the CPU-only Deployment remained 1/1. Neither run altered the 0.5B result artifact; staged model files remain outside git.
+
+## Bounded Quantization Quality and Q8 16K Stress (2026-10-31)
+
+The paired quality outputs and the separate Q8 long-context measurements are preserved in [Q8 matched-4K quality results](evaluation-results-2026-10-31-qwen2.5-32b-quality-q8-matched-4k.json), [Q4_K_M 4K quality results](evaluation-results-2026-10-31-qwen2.5-32b-quality-q4km.json), and [Q8 long-context stress results](evaluation-results-2026-10-31-qwen2.5-32b-long-context-q8.json). An additional exploratory Q8 quality pass at the active 16K setting is in [Q8 16K quality results](evaluation-results-2026-10-31-qwen2.5-32b-quality-q8.json); the context-matched comparison below uses the two 4K artifacts.
+
+### Paired Quality Method and Results
+
+Both quantizations used the same six prompts, explicit Qwen2.5-Instruct chat markers, `temperature=0`, `seed=42`, and `max_tokens=120`. Input lengths were identical for each pair: 80, 83, 63, 66, 88, and 71 tokens. Q8 ran on its normal two-P40 topology at a temporary 4K context; Q4_K_M ran on one visible P40 at 4K, with a temporary profile label. Model files are the verified same-revision artifacts documented above. This matches prompt and context, but not GPU placement or available VRAM.
+
+| Task | Q8_0 / 4K | Q4_K_M / 4K | Objective outcome |
+|---|---:|---:|---|
+| Faithful extraction | Pass | Pass | Exact JSON fields and source values |
+| Concise summary | Fail | Fail | Q8 omitted unchanged customer data; Q4 omitted the count of 48 services |
+| Arithmetic | Fail | Fail | Both reached the 120-token cap before stating the final total |
+| Instruction following | Fail | Fail | Q8 used `False` instead of the required `no`; Q4 did not follow the exact three-line format |
+| Code explanation | Pass | Pass | Both gave the exact returned list and inclusive score threshold |
+| Source-grounded facts | Pass | Pass | Both included all four required report facts |
+| **Automated checks** | **3/6** | **3/6** | No subjective scoring performed |
+
+The raw responses are retained; the automated checks do not replace human review, and this six-prompt set does not establish a general quality winner. The matched-context score is a quality-only comparison, not a speed result. The Q4 temporary Deployment used one requested GPU, 4 CPU, 28 GiB memory, `--device CUDA0`, and `--ctx-size 4096`; the assigned P40 exposed UUID `GPU-5cc04de7-1ef7-af52-1e2f-ca71fa8200e3`, and logs reported all 65/65 layers offloaded. Its sampled device peak was 20,059 MiB of 23,040 MiB, leaving 2,981 MiB (2.91 GiB) at the sampled peak. The Q8 4K counterpart retained the two-GPU `CUDA0,CUDA1` layer split.
+
+The evaluation runner refuses to overwrite an existing output file. Example invocations, after the corresponding live profile is ready, are:
+
+```sh
+python3 inference/llama-cpp-smoke/evaluate_32b.py \
+	--mode quality --profile q8-two-gpu-4k --timeout 300 \
+	--output /tmp/q8-quality.json
+
+python3 inference/llama-cpp-smoke/evaluate_32b.py \
+	--mode quality --profile q4-one-gpu-4k --timeout 300 \
+	--output /tmp/q4-quality.json
+```
+
+Q4 is a temporary live-only Deployment change; do not edit the checked-in serving manifests to retain it. Restore the source-defined active profile with `kubectl apply -k kubernetes`, wait for `kubectl -n inference rollout status deployment/llama-cpp-server`, then verify `kubectl diff -k kubernetes` is empty. The CPU Deployment is separate and remains untouched.
+
+### Q8 Long-Context and Concurrency Method
+
+The active Q8 profile used one pod, 8 CPU, 56 GiB memory, both Tesla P40s, layer split `1,1`, context 16,384, and the pinned llama.cpp `b12019-1052f7e1d` image. The server reported four slots sharing a 16,384-cell unified F16 KV cache of 4,096 MiB. Prompts used the same explicit chat template, placed retrieval facts at the beginning, middle, and end, and were tuned with `/tokenize`. Each serial request reserved 96 output tokens; both concurrent requests reserved 64 tokens each. The completion endpoint's `prompt_n` matched `/tokenize` for every request.
+
+| Serial target | Actual prompt tokens | Prompt eval ms | Generation ms | Client latency ms | Generated tokens | Retrieval / truncation |
+|---:|---:|---:|---:|---:|---:|---|
+| 4,096 | 4,066 | 13,072.2 | 6,498.1 | 19,587.5 | 40 | All facts; EOS; not truncated |
+| 8,192 | 8,191 | 23,861.1 | 6,896.2 | 31,742.4 | 40 | All facts; EOS; not truncated |
+| 12,288 | 12,283 | 38,932.8 | 7,286.3 | 48,150.0 | 40 | All facts; EOS; not truncated |
+| 15,360 | 15,352 | 51,847.7 | 7,582.7 | 62,313.1 | 40 | All facts; EOS; not truncated |
+
+The near-16K request reserved 15,448 cells (15,352 input plus 96 output), 936 below the configured limit. At concurrency 2, both prompts were 6,112 tokens; with both 64-token reserves, the shared budget was 12,352 of 16,384 cells. Both retrieved all facts and generated 40 tokens, with client latencies of 54,007.2 and 54,567.4 ms; the pair completed in 54,978.8 ms wall time. There were no request errors, context truncations, or pod restarts. Final health was `{"status":"ok"}`.
+
+| Device | Peak sampled VRAM | Device total | Headroom at sample peak |
+|---|---:|---:|---:|
+| GPU0, `f5b42f9b-16dd-cfe9-aab5-9a6ca129c29d` | 19,143 MiB | 23,040 MiB | 3,897 MiB (3.81 GiB) |
+| GPU1, `5cc04de7-1ef7-af52-1e2f-ca71fa8200e3` | 18,725 MiB | 23,040 MiB | 4,315 MiB (4.21 GiB) |
+
+VRAM is device-wide and sampled at a nominal 500 ms interval (816 samples in the stress artifact); short peaks may be missed and other allocations can affect the readings. These observations apply to this pinned model, image, driver, and node only; they do not prove a universal context/concurrency limit or imply preserved quality at arbitrary prompt lengths.
+
+Reproduce the Q8 stress run against the reachable Service ClusterIP with:
+
+```sh
+python3 inference/llama-cpp-smoke/evaluate_32b.py \
+	--mode long --profile q8-two-gpu-16k --timeout 300 \
+	--output /tmp/q8-long-context.json
+```
+
+This performs one serial request at each target and one two-request concurrency run, captures per-request response and relevant logs, samples `nvidia-smi`, and records health, slots, and pod restart state. It stops on request failure, truncation, context-budget failure, relevant CUDA/OOM logs, unhealthy state, or restart. The run was followed by `kubectl apply -k kubernetes`; the final GPU Deployment is Q8_0 at 16,384 with one ready pod and two GPUs, the CPU Deployment is 1/1, and `kubectl diff -k kubernetes` is empty. Temporary Recreate rollouts caused brief planned GPU-Service downtime; exact downtime was not measured. The CPU service remained available throughout.
+
+Focused runner checks: `pytest -q inference/llama-cpp-smoke/test_evaluate_32b.py` and `python3 -m py_compile inference/llama-cpp-smoke/evaluate_32b.py inference/llama-cpp-smoke/test_evaluate_32b.py`. No repository lint configuration or lint command is defined for this directory.
