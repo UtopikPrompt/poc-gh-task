@@ -136,38 +136,61 @@ Human sets GitHub Project task to ready -> GitHub event triggers CI/workflow int
 The graph should be explicit and bounded. The platform should not rely on one unrestricted “agent loop.” Instead, a typical workflow runs as a structured set of states.
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor Human
-    participant Project as GitHub Project
-    participant Intake as CI/workflow intake
-    participant Graph as LangGraph orchestrator
-   participant Workers as Bounded PR production tools
-    participant GitHub as GitHub
+flowchart TD
+   Human["Human"]
+   Project["GitHub Project"]
+   GitHub["GitHub"]
+   CI["GitHub-native CI"]
+   ChecksGate{"GitHub ruleset: all required PR checks succeeded?"}
+   MergeBlocked["Merge blocked; task remains active"]
+   CompletionPending["Keep task active; await valid GitHub state"]
 
-    Note over Project: App supports multi-orgs & selected repos
+   subgraph GitHubService["GitHub Service"]
+      Webhook["Receive and verify GitHub webhooks"]
+      Normalize["Normalize task events"]
+      InboxOutbox["Own durable inbox and outbox"]
+      Operations["Authenticated interface for bounded GitHub operations"]
+      AppAccess["Own GitHub App access"]
+      Revalidate["Re-read current PR merge and required-check state"]
+      Complete["Set Project task to done"]
+   end
 
-    Human->>Project: Set task status to ready
-    Project-->>Intake: Status transition triggers intake
-   Note over Intake,GitHub: GitHub-native CI runs configured checks on GitHub events and LangGraph does not launch commands
-    Intake->>Graph: Start task workflow
-    
-    Note over Graph: Each task targets exactly one repository
-    
-    Graph->>Workers: Orchestrate bounded task execution
-   Graph->>Workers: Prepare bounded repository changes
-   Workers->>GitHub: Open PR
-   GitHub-->>Graph: Report PR CI results
-    GitHub-->>Human: PR is available for review
-    
-   Note over Human: Double-check PR risk summary, and merge only after all PR CI checks succeed
+   subgraph LangGraphService["LangGraph Service"]
+      Consume["Consume task events through authenticated interface"]
+      Workflow["Run bounded task workflow"]
+      RequestOperations["Request bounded GitHub operations"]
+   end
 
-   Note over GitHub: Pending, unavailable, errored, or failed checks block merge, with no override
-   Note over Workers: PR-producing authority cannot merge or change target branch
+   subgraph PostgreSQL["PostgreSQL: initial durable queue, event, and state store"]
+      EventLedger["GitHub Service-owned event ledger and inbox/outbox"]
+      Checkpoints["LangGraph Service-owned checkpoints"]
+   end
 
-    Human->>GitHub: Merge PR
-    GitHub-->>Project: Successful merge event
-    Project->>Project: Automatically set task status to done
+   Human -->|Set task ready| Project
+   Project -->|Project webhook| Webhook
+   GitHub -->|Check and merge webhooks| Webhook
+   Webhook --> Normalize
+   Normalize --> InboxOutbox
+   InboxOutbox --> EventLedger
+   EventLedger -->|Authenticated task-event interface| Consume
+   Consume --> Workflow
+   Workflow <--> Checkpoints
+   Workflow --> RequestOperations
+   RequestOperations -->|Authenticated request| Operations
+   Operations --> AppAccess
+   AppAccess -->|GitHub App API| GitHub
+
+   GitHub -->|PR events| CI
+   CI -->|Publish check results| GitHub
+   GitHub -->|Published check state| ChecksGate
+   ChecksGate -->|No| MergeBlocked
+   ChecksGate -->|Yes| Human
+   Human -->|Human alone merges PR| GitHub
+   GitHub -->|Merge webhook| Webhook
+   Webhook -->|Merge event| Revalidate
+   Revalidate -->|Confirmed merge and successful checks| Complete
+   Revalidate -->|Merge or checks not confirmed| CompletionPending
+   Complete -->|Update task status| Project
 ```
 
 ### 4.1 Intake and normalization
@@ -334,6 +357,25 @@ The platform should support resumable graph state and bounded retries. Failures 
 - retries are limited and policy-aware,
 - PR-production tool failures may trigger a controlled retry or escalation,
 - persistent errors surface with enough context for operators to intervene.
+
+### 6.5 Implemented service and persistence boundaries
+
+The runnable implementation uses two services with the existing package names:
+
+| Service | Entrypoint | Owns |
+| --- | --- | --- |
+| GitHub service | `uvicorn codefactory.github_service.host:create_app --factory` | Public signed webhooks, GitHub App credentials and API calls, event normalization, delivery ledger, durable event inbox/outbox, task-to-PR mappings, Project completion writes |
+| LangGraph service | `uvicorn codefactory.langgraph_service.host:create_app --factory` | Durable event consumption, graph execution, task lifecycle, and LangGraph checkpoints |
+
+The GitHub service returns after normalized events are committed. The LangGraph worker claims outbox rows in PostgreSQL using `FOR UPDATE SKIP LOCKED`, a bounded lease, an attempt counter, and delayed retries that eventually dead-letter. A unique delivery-and-event ordinal makes webhook replays idempotent at enqueue time. Queue delivery is at least once, so injected operations must tolerate retry; GitHub PR publication reuses the already registered task PR. There is no Redis or Kafka queue by default.
+
+Production PostgreSQL ownership is split by schema and runtime role. The GitHub service's `github_service` schema contains webhook deliveries, normalized inbox rows, outbox state, task context, and PR mappings. Its event ledger is distinct from the `langgraph_service` schema containing LangGraph checkpoints. The GitHub runtime role has access only to the GitHub schema; the LangGraph runtime role has access only to its checkpoint schema and calls GitHub capabilities over the authenticated internal API. The service roles are `NOLOGIN`; operators map environment-specific login roles and credentials to them and configure the LangGraph connection's search path for `langgraph_service`. The checked-in SQL defines no passwords or login secrets.
+
+Apply `codefactory/github_service/migrations/001_github_event_queue.sql`, then `codefactory/langgraph_service/migrations/001_checkpoint_schema.sql`, then `codefactory/github_service/migrations/002_service_roles.sql` using an authorized database administration identity before starting the production services. Runtime startup does not create or alter the production schema. `GITHUB_DATABASE_URL` and `LANGGRAPH_DATABASE_URL` are separate secret-managed connections. SQLite remains available through the local `create_app` factory and tests only; the production host factories fail unless their PostgreSQL settings and internal authentication are configured.
+
+The LangGraph-to-GitHub API is bearer-authenticated. Its bounded capabilities are queue claim/ack/retry, PR publication, and task completion. PR publication derives the repository and Project context from GitHub-owned task records; LangGraph does not choose a different target repository, call the GitHub App directly, merge PRs, write branches, or run shell/process commands. The GitHub service re-fetches the matching PR and current check/status results after a merge webhook and writes `done` only when the PR is closed and merged and all returned checks are successful. GitHub branch/ruleset configuration remains responsible for blocking human merge until every repository-required check succeeds; configure and verify that separately.
+
+SQLite and mocked-connection tests validate local behavior and PostgreSQL claim SQL, not a live PostgreSQL server. Production still requires the database instance, schema application, role/login mapping, secret delivery, TLS/network policy for the internal API, GitHub App installation and least-privilege permissions, protected-branch required checks, and an operator-supplied `WORKFLOW_OPERATIONS_MODULE`. No PR-producing model/worker, cloud provider, or workload sizing is bundled or implied.
 
 ## 7. Observability and operations
 
