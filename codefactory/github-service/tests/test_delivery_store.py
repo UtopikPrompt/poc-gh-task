@@ -1,3 +1,7 @@
+import sqlite3
+
+import pytest
+
 from github_service.delivery_store import (
     PostgresDeliveryStore,
     SQLiteDeliveryStore,
@@ -107,6 +111,59 @@ def test_queue_serializes_events_for_the_same_task(tmp_path):
         store.close()
 
 
+def test_task_installation_context_is_persisted_and_cannot_be_switched(tmp_path):
+    store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
+    ready_event = {
+        "task_id": "task-installation",
+        "event_type": "ready",
+        "project_node_id": "PVT_project",
+        "project_item_id": "PVTI_item",
+        "target_repositories": ["example/project"],
+        "installation_id": 654,
+    }
+    try:
+        store.enqueue_events("delivery-first", [ready_event])
+        assert store.task_context("task-installation") == {
+            "project_node_id": "PVT_project",
+            "project_item_id": "PVTI_item",
+            "target_repository": "example/project",
+            "installation_id": "654",
+        }
+
+        conflicting_event = {**ready_event, "installation_id": 987}
+        with pytest.raises(ValueError, match="immutable task context"):
+            store.enqueue_events("delivery-conflict", [conflicting_event])
+        assert store.task_context("task-installation")["installation_id"] == "654"
+    finally:
+        store.close()
+
+
+def test_legacy_task_context_without_installation_is_not_reused(tmp_path):
+    database_path = tmp_path / "github.sqlite"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE task_contexts (task_id TEXT PRIMARY KEY, "
+        "project_node_id TEXT NOT NULL, project_item_id TEXT NOT NULL, "
+        "target_repository TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO task_contexts VALUES (?, ?, ?, ?)",
+        ("legacy-task", "PVT_project", "PVTI_item", "example/project"),
+    )
+    connection.commit()
+    connection.close()
+
+    store = SQLiteDeliveryStore(database_path)
+    try:
+        assert store.task_context("legacy-task") is None
+        assert "installation_id" in {
+            row["name"]
+            for row in store._connection.execute("PRAGMA table_info(task_contexts)")
+        }
+    finally:
+        store.close()
+
+
 def test_postgres_claim_uses_skip_locked_and_returns_claimed_event():
     statements = []
 
@@ -207,3 +264,78 @@ def test_postgres_concurrent_webhook_delivery_reports_in_progress():
     assert store.claim_delivery("delivery-1") == "in_progress"
     assert len(statements) == 2
     assert "FOR UPDATE" in statements[1]
+
+
+@pytest.mark.parametrize("stored_installation_id", [654, 987])
+def test_postgres_task_context_never_changes_installation(stored_installation_id):
+    statements = []
+    connection_state = {"committed": False, "rolled_back": False}
+
+    class Cursor:
+        def __init__(self):
+            self.result = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, statement, params=()):
+            statements.append((statement, params))
+            if "INSERT INTO github_service.task_event_inbox" in statement:
+                self.result = {"event_id": "event-1"}
+            elif "SELECT project_node_id, project_item_id" in statement:
+                self.result = {
+                    "project_node_id": "PVT_project",
+                    "project_item_id": "PVTI_item",
+                    "target_repository": "example/project",
+                    "installation_id": stored_installation_id,
+                }
+            else:
+                self.result = None
+
+        def fetchone(self):
+            return self.result
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            connection_state["committed"] = True
+
+        def rollback(self):
+            connection_state["rolled_back"] = True
+
+        def close(self):
+            pass
+
+    store = PostgresDeliveryStore(
+        "postgresql://test",
+        connection_factory=Connection,
+    )
+    event = {
+        "task_id": "task-1",
+        "event_type": "ready",
+        "project_node_id": "PVT_project",
+        "project_item_id": "PVTI_item",
+        "target_repositories": ["example/project"],
+        "installation_id": 654,
+    }
+
+    if stored_installation_id == 654:
+        assert store.enqueue_events("delivery-1", [event]) == ["event-1"]
+        assert connection_state == {"committed": True, "rolled_back": False}
+    else:
+        with pytest.raises(ValueError, match="immutable task context"):
+            store.enqueue_events("delivery-1", [event])
+        assert connection_state == {"committed": False, "rolled_back": True}
+
+    context_insert = next(
+        statement
+        for statement, _ in statements
+        if "INSERT INTO github_service.task_contexts" in statement
+    )
+    assert "ON CONFLICT(task_id) DO NOTHING" in context_insert
+    assert "DO UPDATE" not in context_insert

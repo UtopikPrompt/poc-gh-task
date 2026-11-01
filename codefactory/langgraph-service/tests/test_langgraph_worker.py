@@ -1,8 +1,10 @@
+import json
+
 import httpx
 import pytest
 from langgraph_service.github_client import (
     GitHubServiceClient,
-    build_publish_pr_operation,
+    build_submit_proposal_operation,
 )
 from langgraph_service.worker import LangGraphEventWorker
 
@@ -80,6 +82,19 @@ def test_worker_retries_graph_failure_without_acknowledging():
     ]
 
 
+def test_worker_does_not_claim_events_when_local_model_is_unavailable():
+    queue = FakeQueue()
+    worker = LangGraphEventWorker(
+        queue=queue,
+        lifecycle=FakeLifecycle(),
+        readiness=lambda: False,
+    )
+
+    assert worker.process_one() is False
+    assert queue.calls == []
+    assert queue.event is not None
+
+
 def test_worker_only_records_done_after_github_completion_confirmation():
     queue = FakeQueue()
     queue.event["payload"] = {
@@ -127,7 +142,7 @@ def test_worker_retries_merge_event_while_github_revalidation_is_unconfirmed():
     )
 
 
-def test_github_service_client_authenticates_and_builds_bounded_pr_request():
+def test_github_service_client_authenticates_and_submits_typed_file_changes():
     requests = []
 
     def handler(request):
@@ -147,15 +162,20 @@ def test_github_service_client_authenticates_and_builds_bounded_pr_request():
         transport=httpx.MockTransport(handler),
     )
     try:
-        operation = build_publish_pr_operation(client)
+        operation = build_submit_proposal_operation(client)
         result = operation(
             {
                 "task_id": "task-1",
                 "change": {
-                    "pull_request_title": "A task",
-                    "pull_request_body": "Risk summary",
-                    "head_branch": "automation/task-1",
-                    "base_branch": "main",
+                    "summary": "prepared",
+                    "risk_summary": "Review potential caller impact.",
+                    "changes": [
+                        {
+                            "operation": "create",
+                            "path": "src/task.py",
+                            "content": "print('task')\n",
+                        }
+                    ],
                 },
             }
         )
@@ -163,5 +183,42 @@ def test_github_service_client_authenticates_and_builds_bounded_pr_request():
         client.close()
 
     assert result["pull_request_id"] == "9001"
-    assert requests[0].url.path == "/internal/github/publish-pr"
+    assert requests[0].url.path == "/internal/github/propose-changes"
     assert requests[0].headers["Authorization"] == "Bearer test-token"
+    assert json.loads(requests[0].content) == {
+        "task_id": "task-1",
+        "summary": "prepared",
+        "risk_summary": "Review potential caller impact.",
+        "changes": [
+            {
+                "operation": "create",
+                "path": "src/task.py",
+                "content": "print('task')\n",
+            }
+        ],
+    }
+
+
+def test_proposal_operation_rejects_old_metadata_and_invalid_operations():
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={})),
+    )
+    try:
+        operation = build_submit_proposal_operation(client)
+        with pytest.raises(ValueError, match="no file changes"):
+            operation({"task_id": "task-1", "change": {"head_branch": "main"}})
+        with pytest.raises(ValueError, match="invalid file change"):
+            operation(
+                {
+                    "task_id": "task-1",
+                    "change": {
+                        "changes": [
+                            {"operation": "delete", "path": "a.py", "content": ""}
+                        ]
+                    },
+                }
+            )
+    finally:
+        client.close()

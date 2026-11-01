@@ -8,7 +8,7 @@ INFERENCE_TESTS := inference-platform/inference/llama-cpp-smoke/test_evaluate_32
 .PHONY: install-dev test lint format kustomize check
 
 install-dev:
-	$(PYTHON) -m pip install -e 'codefactory/github-service[test]' -e 'codefactory/langgraph-service[test]'
+	$(PYTHON) -m pip install -r requirements-dev.txt -e 'codefactory/github-service[test]' -e 'codefactory/langgraph-service[test]'
 
 test:
 	PYTHONPATH='$(CODEFACTORY_PYTHONPATH)' $(PYTHON) -m pytest -c codefactory/github-service/pyproject.toml $(CODEFACTORY_TESTS) $(INFERENCE_TESTS)

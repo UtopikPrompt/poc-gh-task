@@ -44,7 +44,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE github_service_owner IN SCHEMA github_service
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO github_service_runtime;
 
 ALTER SCHEMA langgraph_service OWNER TO langgraph_service_owner;
-GRANT USAGE, CREATE ON SCHEMA langgraph_service TO langgraph_service_runtime;
+GRANT USAGE ON SCHEMA langgraph_service TO langgraph_service_runtime;
 ALTER ROLE langgraph_service_runtime SET search_path TO langgraph_service;
 ALTER DEFAULT PRIVILEGES FOR ROLE langgraph_service_runtime IN SCHEMA langgraph_service
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO langgraph_service_runtime;

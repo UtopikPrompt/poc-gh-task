@@ -3,7 +3,7 @@
     "info": {
         "title": "Codefactory LangGraph Service",
         "version": "1.0.0",
-        "description": "The worker exposes health only; event and GitHub operations use the GitHub Service contract."
+        "description": "The worker exposes liveness and readiness only; event and GitHub operations use the GitHub Service contract."
     },
     "paths": {
         "/healthz": {
@@ -22,6 +22,55 @@
                                     "properties": {
                                         "status": {
                                             "const": "ok"
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/readyz": {
+            "get": {
+                "operationId": "readyz",
+                "responses": {
+                    "200": {
+                        "description": "Service and required inference dependency are ready",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "status"
+                                    ],
+                                    "properties": {
+                                        "status": {
+                                            "const": "ok"
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A required dependency is unavailable",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "status",
+                                        "dependency"
+                                    ],
+                                    "properties": {
+                                        "status": {
+                                            "const": "unavailable"
+                                        },
+                                        "dependency": {
+                                            "const": "local_model"
                                         }
                                     },
                                     "additionalProperties": false

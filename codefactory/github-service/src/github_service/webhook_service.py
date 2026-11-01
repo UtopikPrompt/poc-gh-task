@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from github_service.events import GitHubWebhook
+from github_service.events import GitHubWebhook, normalize_installation_id
 
 
 class DeliveryStore(Protocol):
@@ -59,6 +59,7 @@ class WebhookService:
             return {"status": "in_progress", "delivery_id": delivery_id}
 
         try:
+            webhook_installation_id = normalize_installation_id(webhook.installation_id)
             normalized = self._normalize_event(webhook, self._store)
             if normalized is None:
                 response: dict[str, object] = {
@@ -88,6 +89,14 @@ class WebhookService:
                             "normalized event has an unsupported event_type"
                         )
                     normalized_event = dict(event)
+                    event_installation_id = normalize_installation_id(
+                        normalized_event.get("installation_id")
+                    )
+                    if event_installation_id != webhook_installation_id:
+                        raise ValueError(
+                            "normalized event installation does not match webhook"
+                        )
+                    normalized_event["installation_id"] = event_installation_id
                     normalized_event["webhook_delivery_id"] = delivery_id
                     normalized_events.append(normalized_event)
                 if not normalized_events:

@@ -23,5 +23,5 @@ def test_langgraph_service_uses_postgres_saver_factory():
     ) as service:
         result = service.invoke({"task_id": "task-1", "event_type": "unknown"})
 
-    assert calls == ["postgresql://configured-by-operator", "setup"]
+    assert calls == ["postgresql://configured-by-operator"]
     assert result["workflow_status"] == "invalid_event"

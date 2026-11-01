@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Protocol
 
 from langgraph_service.service import TaskLifecycle
@@ -19,11 +19,20 @@ class GitHubEventQueue(Protocol):
 
 
 class LangGraphEventWorker:
-    def __init__(self, *, queue: GitHubEventQueue, lifecycle: TaskLifecycle):
+    def __init__(
+        self,
+        *,
+        queue: GitHubEventQueue,
+        lifecycle: TaskLifecycle,
+        readiness: Callable[[], bool] | None = None,
+    ):
         self._queue = queue
         self._lifecycle = lifecycle
+        self._readiness = readiness
 
     def process_one(self) -> bool:
+        if self._readiness is not None and not self._readiness():
+            return False
         event = self._queue.claim_event()
         if event is None:
             return False

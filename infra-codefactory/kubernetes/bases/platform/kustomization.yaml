@@ -3,3 +3,7 @@ kind: Kustomization
 resources:
 - namespace.yaml
 - service-config.yaml
+- database-config.yaml
+- github-settings.yaml
+- postgres.yaml
+- database-migrations.yaml

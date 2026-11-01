@@ -62,7 +62,6 @@ class LangGraphTaskService:
             saver_context = SqliteSaver.from_conn_string(str(self._database_path))
         checkpointer = saver_context.__enter__()
         try:
-            checkpointer.setup()
             self._graph = build_task_graph(
                 self._operations,
                 checkpointer=checkpointer,

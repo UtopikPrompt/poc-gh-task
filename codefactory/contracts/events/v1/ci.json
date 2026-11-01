@@ -8,6 +8,7 @@
         "event_pull_request_id",
         "ci_checks",
         "ci_complete",
+        "installation_id",
         "webhook_delivery_id"
     ],
     "properties": {
@@ -45,6 +46,10 @@
         },
         "ci_complete": {
             "type": "boolean"
+        },
+        "installation_id": {
+            "type": "integer",
+            "minimum": 1
         },
         "webhook_delivery_id": {
             "type": "string"

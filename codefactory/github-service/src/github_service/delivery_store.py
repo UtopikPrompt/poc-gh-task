@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+from github_service.events import normalize_installation_id
+
 DeliveryClaim = Literal["claimed", "duplicate", "in_progress"]
 
 
@@ -59,7 +61,8 @@ class SQLiteDeliveryStore:
                 task_id TEXT PRIMARY KEY,
                 project_node_id TEXT NOT NULL,
                 project_item_id TEXT NOT NULL,
-                target_repository TEXT NOT NULL
+                target_repository TEXT NOT NULL,
+                installation_id INTEGER
             );
             CREATE INDEX IF NOT EXISTS task_event_outbox_ready
                 ON task_event_outbox(state, available_at, lease_until);
@@ -72,6 +75,14 @@ class SQLiteDeliveryStore:
             );
             """
         )
+        context_columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(task_contexts)")
+        }
+        if "installation_id" not in context_columns:
+            self._connection.execute(
+                "ALTER TABLE task_contexts ADD COLUMN installation_id INTEGER"
+            )
 
     def claim_delivery(self, delivery_id: str) -> DeliveryClaim:
         with self._lock:
@@ -157,21 +168,38 @@ class SQLiteDeliveryStore:
                         and len(repositories) == 1
                         and isinstance(repositories[0], str)
                     ):
+                        installation_id = normalize_installation_id(
+                            event.get("installation_id")
+                        )
                         self._connection.execute(
                             "INSERT INTO task_contexts "
                             "(task_id, project_node_id, project_item_id, "
-                            "target_repository) VALUES (?, ?, ?, ?) "
-                            "ON CONFLICT(task_id) DO UPDATE SET "
-                            "project_node_id = excluded.project_node_id, "
-                            "project_item_id = excluded.project_item_id, "
-                            "target_repository = excluded.target_repository",
+                            "target_repository, installation_id) "
+                            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id) DO NOTHING",
                             (
                                 str(event["task_id"]),
                                 project_node_id,
                                 project_item_id,
                                 repositories[0],
+                                installation_id,
                             ),
                         )
+                        context = self._connection.execute(
+                            "SELECT project_node_id, project_item_id, "
+                            "target_repository, installation_id FROM task_contexts "
+                            "WHERE task_id = ?",
+                            (str(event["task_id"]),),
+                        ).fetchone()
+                        if (
+                            context is None
+                            or context["project_node_id"] != project_node_id
+                            or context["project_item_id"] != project_item_id
+                            or context["target_repository"] != repositories[0]
+                            or context["installation_id"] != installation_id
+                        ):
+                            raise ValueError(
+                                "ready event conflicts with immutable task context"
+                            )
                     event_ids.append(event_id)
                 self._connection.commit()
                 return event_ids
@@ -345,17 +373,19 @@ class SQLiteDeliveryStore:
     def task_context(self, task_id: str) -> dict[str, str] | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT project_node_id, project_item_id, target_repository "
+                "SELECT project_node_id, project_item_id, target_repository, "
+                "installation_id "
                 "FROM task_contexts "
                 "WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
-        if row is None:
+        if row is None or row["installation_id"] is None:
             return None
         return {
             "project_node_id": str(row["project_node_id"]),
             "project_item_id": str(row["project_item_id"]),
             "target_repository": str(row["target_repository"]),
+            "installation_id": str(row["installation_id"]),
         }
 
     @contextmanager
@@ -486,21 +516,41 @@ class PostgresDeliveryStore:
                     and len(repositories) == 1
                     and isinstance(repositories[0], str)
                 ):
+                    installation_id = normalize_installation_id(
+                        event.get("installation_id")
+                    )
                     cursor.execute(
                         "INSERT INTO github_service.task_contexts "
                         "(task_id, project_node_id, project_item_id, "
-                        "target_repository) VALUES (%s, %s, %s, %s) "
-                        "ON CONFLICT(task_id) DO UPDATE SET "
-                        "project_node_id = EXCLUDED.project_node_id, "
-                        "project_item_id = EXCLUDED.project_item_id, "
-                        "target_repository = EXCLUDED.target_repository",
+                        "target_repository, installation_id) "
+                        "VALUES (%s, %s, %s, %s, %s) "
+                        "ON CONFLICT(task_id) DO NOTHING",
                         (
                             str(event["task_id"]),
                             project_node_id,
                             project_item_id,
                             repositories[0],
+                            installation_id,
                         ),
                     )
+                    cursor.execute(
+                        "SELECT project_node_id, project_item_id, "
+                        "target_repository, installation_id "
+                        "FROM github_service.task_contexts "
+                        "WHERE task_id = %s FOR UPDATE",
+                        (str(event["task_id"]),),
+                    )
+                    context = cursor.fetchone()
+                    if (
+                        context is None
+                        or context["project_node_id"] != project_node_id
+                        or context["project_item_id"] != project_item_id
+                        or context["target_repository"] != repositories[0]
+                        or context["installation_id"] != installation_id
+                    ):
+                        raise ValueError(
+                            "ready event conflicts with immutable task context"
+                        )
                 event_ids.append(event_id)
         return event_ids
 
@@ -668,17 +718,19 @@ class PostgresDeliveryStore:
     def task_context(self, task_id: str) -> dict[str, str] | None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT project_node_id, project_item_id, target_repository "
+                "SELECT project_node_id, project_item_id, target_repository, "
+                "installation_id "
                 "FROM github_service.task_contexts WHERE task_id = %s",
                 (task_id,),
             )
             row = cursor.fetchone()
-            if row is None:
+            if row is None or row["installation_id"] is None:
                 return None
             return {
                 "project_node_id": str(row["project_node_id"]),
                 "project_item_id": str(row["project_item_id"]),
                 "target_repository": str(row["target_repository"]),
+                "installation_id": str(row["installation_id"]),
             }
 
     @contextmanager

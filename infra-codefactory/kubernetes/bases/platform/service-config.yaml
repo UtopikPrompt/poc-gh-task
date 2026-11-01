@@ -4,4 +4,6 @@ metadata:
   name: codefactory-service-config
 data:
   GITHUB_SERVICE_URL: http://github-service:8000
+  LLAMA_CPP_URL: http://llama-cpp-server.inference.svc.cluster.local:8080
+  WORKFLOW_OPERATIONS_MODULE: langgraph_service.workflow_operations
   WORKER_POLL_SECONDS: "1"

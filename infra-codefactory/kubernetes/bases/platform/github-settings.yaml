@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codefactory-github-settings
+data:
+  GITHUB_APP_ID: ""
+  GITHUB_PROJECT_OWNER: ""
+  GITHUB_PROJECT_OWNER_TYPE: ""
+  GITHUB_PROJECT_NUMBER: ""

@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from github_service.database import postgres_url_from_environment
 
 
 @dataclass(frozen=True)
 class RuntimeSettings:
     github_webhook_secret: str
     database_path: Path
-    github_database_url: str | None = None
-    langgraph_database_url: str | None = None
+    github_database_url: str | None = field(default=None, repr=False)
     github_service_url: str = "http://github-service:8000"
     internal_service_token: str = ""
     max_webhook_bytes: int = 1_000_000
@@ -20,13 +21,14 @@ class RuntimeSettings:
     worker_lease_seconds: int = 60
     worker_max_attempts: int = 8
     github_app_id: int | None = None
-    github_installation_id: int | None = None
     github_private_key_path: Path | None = None
     github_api_url: str = "https://api.github.com"
-    project_node_id: str = ""
-    project_status_field_id: str = ""
-    project_ready_option_id: str = ""
-    project_done_option_id: str = ""
+    github_project_owner: str = ""
+    github_project_owner_type: str = ""
+    github_project_number: int | None = None
+    project_status_field_name: str = "Status"
+    project_ready_option_name: str = "Ready"
+    project_done_option_name: str = "Done"
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
@@ -49,8 +51,7 @@ class RuntimeSettings:
         return cls(
             github_webhook_secret=secret,
             database_path=database_path,
-            github_database_url=os.environ.get("GITHUB_DATABASE_URL"),
-            langgraph_database_url=os.environ.get("LANGGRAPH_DATABASE_URL"),
+            github_database_url=postgres_url_from_environment("GITHUB", required=False),
             github_service_url=os.environ.get(
                 "GITHUB_SERVICE_URL", "http://github-service:8000"
             ),
@@ -60,17 +61,20 @@ class RuntimeSettings:
             worker_lease_seconds=worker_lease_seconds,
             worker_max_attempts=worker_max_attempts,
             github_app_id=_optional_int("GITHUB_APP_ID"),
-            github_installation_id=_optional_int("GITHUB_INSTALLATION_ID"),
             github_private_key_path=_optional_path("GITHUB_PRIVATE_KEY_PATH"),
             github_api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
-            project_node_id=os.environ.get("GITHUB_PROJECT_NODE_ID", ""),
-            project_status_field_id=os.environ.get(
-                "GITHUB_PROJECT_STATUS_FIELD_ID", ""
+            github_project_owner=os.environ.get("GITHUB_PROJECT_OWNER", ""),
+            github_project_owner_type=os.environ.get("GITHUB_PROJECT_OWNER_TYPE", ""),
+            github_project_number=_optional_int("GITHUB_PROJECT_NUMBER"),
+            project_status_field_name=os.environ.get(
+                "GITHUB_PROJECT_STATUS_FIELD_NAME", "Status"
             ),
-            project_ready_option_id=os.environ.get(
-                "GITHUB_PROJECT_READY_OPTION_ID", ""
+            project_ready_option_name=os.environ.get(
+                "GITHUB_PROJECT_READY_OPTION_NAME", "Ready"
             ),
-            project_done_option_id=os.environ.get("GITHUB_PROJECT_DONE_OPTION_ID", ""),
+            project_done_option_name=os.environ.get(
+                "GITHUB_PROJECT_DONE_OPTION_NAME", "Done"
+            ),
         )
 
 

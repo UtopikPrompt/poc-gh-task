@@ -1,0 +1,250 @@
+import re
+import subprocess
+from pathlib import Path
+
+import yaml
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+KUBERNETES_ROOT = REPOSITORY_ROOT / "infra-codefactory/kubernetes"
+
+
+def _render_environment(environment: str) -> list[dict[str, object]]:
+    rendered = subprocess.run(
+        [
+            "kubectl",
+            "kustomize",
+            str(KUBERNETES_ROOT / "environments" / environment),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    return list(yaml.safe_load_all(rendered))
+
+
+def test_rendered_database_config_uses_shared_defaults_and_environment_overrides():
+    for environment in ("dev", "staging", "prod"):
+        resources = _render_environment(environment)
+        database_config = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "ConfigMap"
+            and resource.get("metadata", {}).get("name")
+            == "codefactory-database-config"
+        )
+
+        assert database_config["data"] == {
+            "POSTGRES_ADMIN_USERNAME": "codefactory_admin",
+            "GITHUB_DB_USERNAME": "codefactory_github",
+            "GITHUB_DB_PORT": "5432",
+            "GITHUB_DB_NAME": "codefactory",
+            "GITHUB_DB_HOST": "codefactory-postgres",
+            "GITHUB_DB_SSLMODE": "disable",
+            "LANGGRAPH_DB_USERNAME": "codefactory_langgraph",
+            "LANGGRAPH_DB_PORT": "5432",
+            "LANGGRAPH_DB_NAME": "codefactory",
+            "LANGGRAPH_DB_HOST": "codefactory-postgres",
+            "LANGGRAPH_DB_SSLMODE": "disable",
+            **yaml.safe_load(
+                (
+                    KUBERNETES_ROOT
+                    / "environments"
+                    / environment
+                    / "database-config.yaml"
+                ).read_text()
+            )["data"],
+        }
+
+
+def test_service_deployments_source_usernames_and_passwords_separately():
+    for service, username_key, password_key in (
+        ("github-service", "GITHUB_DB_USERNAME", "GITHUB_DB_PASSWORD"),
+        ("langgraph-service", "LANGGRAPH_DB_USERNAME", "LANGGRAPH_DB_PASSWORD"),
+    ):
+        deployment = (
+            KUBERNETES_ROOT / "bases" / service / f"{service}.yaml"
+        ).read_text()
+        username_binding = rf"- name: {username_key}\s+valueFrom:\s+configMapKeyRef:\s+name: codefactory-database-config\s+key: {username_key}"
+        password_binding = rf"- name: {password_key}\s+valueFrom:\s+secretKeyRef:\s+name: codefactory-runtime-secrets\s+key: {password_key}"
+        assert re.search(username_binding, deployment)
+        assert re.search(password_binding, deployment)
+
+
+def test_runtime_secret_example_and_apply_script_exclude_usernames():
+    secrets_directory = KUBERNETES_ROOT / "environments/dev/secrets"
+    example_keys = {
+        line.split("=", maxsplit=1)[0]
+        for line in (secrets_directory / "runtime-secrets.env.example")
+        .read_text()
+        .splitlines()
+        if line and not line.startswith("#")
+    }
+    expected_keys = {
+        "POSTGRES_ADMIN_PASSWORD",
+        "GITHUB_DB_PASSWORD",
+        "LANGGRAPH_DB_PASSWORD",
+        "GITHUB_WEBHOOK_SECRET",
+        "INTERNAL_SERVICE_TOKEN",
+    }
+    assert example_keys == expected_keys
+
+    apply_script = (secrets_directory / "apply-secrets.sh").read_text()
+    assert 'allowed["POSTGRES_ADMIN_PASSWORD"] = 1' in apply_script
+    assert 'allowed["GITHUB_DB_USERNAME"]' not in apply_script
+    assert 'allowed["LANGGRAPH_DB_USERNAME"]' not in apply_script
+    assert "for key in POSTGRES_ADMIN_PASSWORD GITHUB_DB_PASSWORD " in apply_script
+
+
+def test_postgres_and_migration_job_are_bundled_in_every_environment():
+    for environment in ("dev", "staging", "prod"):
+        resources = _render_environment(environment)
+        postgres = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "StatefulSet"
+            and resource.get("metadata", {}).get("name") == "codefactory-postgres"
+        )
+        service = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "Service"
+            and resource.get("metadata", {}).get("name") == "codefactory-postgres"
+        )
+        job = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "Job"
+            and resource.get("metadata", {}).get("name")
+            == "codefactory-database-migrations"
+        )
+
+        pod_spec = postgres["spec"]["template"]["spec"]
+        assert postgres["spec"]["replicas"] == 1
+        assert postgres["spec"]["volumeClaimTemplates"][0]["spec"] == {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": "10Gi"}},
+        }
+        assert (
+            service["spec"]["selector"] == postgres["spec"]["selector"]["matchLabels"]
+        )
+        assert pod_spec["automountServiceAccountToken"] is False
+
+        database_container = next(
+            container
+            for container in pod_spec["containers"]
+            if container["name"] == "postgres"
+        )
+        assert database_container["image"] == "postgres:16.10-bookworm"
+        assert database_container["securityContext"]["runAsNonRoot"] is True
+        secret_keys = {
+            item["name"]: item["valueFrom"]["secretKeyRef"]["key"]
+            for item in database_container["env"]
+            if "secretKeyRef" in item.get("valueFrom", {})
+        }
+        assert secret_keys == {
+            "POSTGRES_PASSWORD": "POSTGRES_ADMIN_PASSWORD",
+            "PGPASSWORD": "POSTGRES_ADMIN_PASSWORD",
+            "GITHUB_DB_PASSWORD": "GITHUB_DB_PASSWORD",
+            "LANGGRAPH_DB_PASSWORD": "LANGGRAPH_DB_PASSWORD",
+        }
+
+        job_spec = job["spec"]["template"]["spec"]
+        assert job_spec["automountServiceAccountToken"] is False
+        assert job_spec["restartPolicy"] == "OnFailure"
+        assert [container["name"] for container in job_spec["initContainers"]] == [
+            "copy-github-migrations",
+            "copy-langgraph-migration",
+        ]
+        assert (
+            "003_github_task_installation.sql"
+            in job_spec["initContainers"][0]["args"][0]
+        )
+        assert job_spec["containers"][0]["command"] == [
+            "python",
+            "-m",
+            "langgraph_service.migrate",
+        ]
+        job_secrets = {
+            item["name"]: item["valueFrom"]["secretKeyRef"]["key"]
+            for item in job_spec["containers"][0]["env"]
+            if "secretKeyRef" in item.get("valueFrom", {})
+        }
+        assert job_secrets == {
+            "POSTGRES_ADMIN_PASSWORD": "POSTGRES_ADMIN_PASSWORD",
+            "GITHUB_DB_PASSWORD": "GITHUB_DB_PASSWORD",
+            "LANGGRAPH_DB_PASSWORD": "LANGGRAPH_DB_PASSWORD",
+        }
+
+        for deployment_name, schema_table in (
+            ("github-service", "github_service.webhook_deliveries"),
+            ("langgraph-service", "langgraph_service.checkpoint_migrations"),
+        ):
+            deployment = next(
+                resource
+                for resource in resources
+                if resource.get("kind") == "Deployment"
+                and resource.get("metadata", {}).get("name") == deployment_name
+            )
+            wait = deployment["spec"]["template"]["spec"]["initContainers"][0]
+            assert wait["name"] == "wait-for-database-migrations"
+            assert schema_table in wait["args"][0]
+            assert "codefactory_migrations.migration_state" in wait["args"][0]
+
+        settings = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "ConfigMap"
+            and resource.get("metadata", {}).get("name")
+            == "codefactory-github-settings"
+        )
+        assert "GITHUB_PROJECT_NODE_ID" not in settings["data"]
+        assert settings["data"] == {
+            "GITHUB_APP_ID": "",
+            "GITHUB_PROJECT_OWNER": "",
+            "GITHUB_PROJECT_OWNER_TYPE": "",
+            "GITHUB_PROJECT_NUMBER": "",
+        }
+        github_deployment = next(
+            resource
+            for resource in resources
+            if resource.get("kind") == "Deployment"
+            and resource.get("metadata", {}).get("name") == "github-service"
+        )
+        github_env = github_deployment["spec"]["template"]["spec"]["containers"][0][
+            "env"
+        ]
+        github_config_refs = {
+            item["name"]: item["valueFrom"]["configMapKeyRef"]["key"]
+            for item in github_env
+            if "configMapKeyRef" in item.get("valueFrom", {})
+            and item["valueFrom"]["configMapKeyRef"]["name"]
+            == "codefactory-github-settings"
+        }
+        assert github_config_refs == {
+            "GITHUB_APP_ID": "GITHUB_APP_ID",
+            "GITHUB_PROJECT_OWNER": "GITHUB_PROJECT_OWNER",
+            "GITHUB_PROJECT_OWNER_TYPE": "GITHUB_PROJECT_OWNER_TYPE",
+            "GITHUB_PROJECT_NUMBER": "GITHUB_PROJECT_NUMBER",
+        }
+        assert not {
+            "GITHUB_INSTALLATION_ID",
+            "GITHUB_PROJECT_NODE_ID",
+            "GITHUB_PROJECT_STATUS_FIELD_ID",
+            "GITHUB_PROJECT_READY_OPTION_ID",
+            "GITHUB_PROJECT_DONE_OPTION_ID",
+        } & set(github_config_refs)
+
+
+def test_installation_migration_is_additive_and_registered():
+    migration = (
+        REPOSITORY_ROOT
+        / "codefactory/github-service/migrations/003_github_task_installation.sql"
+    ).read_text()
+    migration_runner = (
+        REPOSITORY_ROOT
+        / "codefactory/langgraph-service/src/langgraph_service/migrate.py"
+    ).read_text()
+
+    assert "ADD COLUMN IF NOT EXISTS installation_id BIGINT" in migration
+    assert "UPDATE github_service.task_contexts" not in migration
+    assert '"003_github_task_installation.sql"' in migration_runner

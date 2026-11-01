@@ -17,8 +17,6 @@ spec:
         app.kubernetes.io/part-of: codefactory
     spec:
       automountServiceAccountToken: false
-      imagePullSecrets:
-      - name: ghcr-pull-secret
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -26,6 +24,37 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      - name: wait-for-database-migrations
+        image: postgres:16.10-bookworm
+        imagePullPolicy: IfNotPresent
+        command: [ "sh", "-ec" ]
+        args:
+        - |
+          until psql -X -qAt \
+            --host="$LANGGRAPH_DB_HOST" \
+            --port="$LANGGRAPH_DB_PORT" \
+            --username="$LANGGRAPH_DB_USERNAME" \
+            --dbname="$LANGGRAPH_DB_NAME" \
+            --set=ON_ERROR_STOP=1 \
+            --command="SELECT to_regclass('langgraph_service.checkpoint_migrations') IS NOT NULL AND to_regclass('langgraph_service.checkpoints') IS NOT NULL AND (SELECT ready FROM codefactory_migrations.migration_state WHERE id = 1)" | grep -qx t; do
+            sleep 2
+          done
+        envFrom:
+        - configMapRef:
+            name: codefactory-database-config
+        env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: LANGGRAPH_DB_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
       containers:
       - name: langgraph-service
         image: codefactory/langgraph-service:dev
@@ -46,22 +75,24 @@ spec:
         envFrom:
         - configMapRef:
             name: codefactory-service-config
+        - configMapRef:
+            name: codefactory-database-config
         env:
-        - name: LANGGRAPH_DATABASE_URL
+        - name: LANGGRAPH_DB_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-database-config
+              key: LANGGRAPH_DB_USERNAME
+        - name: LANGGRAPH_DB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: codefactory-runtime-secrets
-              key: LANGGRAPH_DATABASE_URL
+              key: LANGGRAPH_DB_PASSWORD
         - name: INTERNAL_SERVICE_TOKEN
           valueFrom:
             secretKeyRef:
               name: codefactory-runtime-secrets
               key: INTERNAL_SERVICE_TOKEN
-        - name: WORKFLOW_OPERATIONS_MODULE
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-langgraph-settings
-              key: WORKFLOW_OPERATIONS_MODULE
         volumeMounts:
         - name: tmp
           mountPath: /tmp
@@ -74,7 +105,7 @@ spec:
           failureThreshold: 30
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /readyz
             port: http
           periodSeconds: 5
           timeoutSeconds: 2

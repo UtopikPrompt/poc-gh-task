@@ -4,6 +4,8 @@ resources:
 - ../../bases/platform
 - ../../bases/github-service
 - ../../bases/langgraph-service
+patches:
+- path: database-config.yaml
 images:
 - name: codefactory/github-service
   newName: ghcr.io/utopikprompt/poc-gh-task-github-service

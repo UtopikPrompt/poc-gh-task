@@ -7,7 +7,7 @@ import hmac
 import json
 import re
 
-from github_service.events import GitHubWebhook
+from github_service.events import GitHubWebhook, normalize_installation_id
 
 
 class WebhookAuthenticationError(ValueError):
@@ -40,9 +40,13 @@ def decode_github_webhook(
         raise ValueError("webhook body must be valid JSON") from error
     if not isinstance(payload, dict):
         raise TypeError("webhook body must be a JSON object")
+    installation = payload.get("installation")
+    if not isinstance(installation, dict):
+        raise ValueError("GitHub webhook is missing installation.id")
 
     return GitHubWebhook(
         event_name=event_name,
         delivery_id=delivery_id,
+        installation_id=normalize_installation_id(installation.get("id")),
         payload=payload,
     )
