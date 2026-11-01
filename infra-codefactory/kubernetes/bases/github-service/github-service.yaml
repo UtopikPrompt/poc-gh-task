@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-service
+  labels:
+    app.kubernetes.io/name: github-service
+    app.kubernetes.io/part-of: codefactory
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: github-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: github-service
+        app.kubernetes.io/part-of: codefactory
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-pull-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: github-service
+        image: codefactory/github-service:dev
+        imagePullPolicy: Always
+        command:
+        - uvicorn
+        args:
+        - github_service.host:create_app
+        - --factory
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8000"
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: codefactory-service-config
+        env:
+        - name: GITHUB_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: GITHUB_DATABASE_URL
+        - name: GITHUB_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: GITHUB_WEBHOOK_SECRET
+        - name: INTERNAL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: INTERNAL_SERVICE_TOKEN
+        - name: GITHUB_APP_ID
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-github-settings
+              key: GITHUB_APP_ID
+        - name: GITHUB_INSTALLATION_ID
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-github-settings
+              key: GITHUB_INSTALLATION_ID
+        - name: GITHUB_PROJECT_NODE_ID
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-github-settings
+              key: GITHUB_PROJECT_NODE_ID
+        - name: GITHUB_PROJECT_STATUS_FIELD_ID
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-github-settings
+              key: GITHUB_PROJECT_STATUS_FIELD_ID
+        - name: GITHUB_PROJECT_READY_OPTION_ID
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-github-settings
+              key: GITHUB_PROJECT_READY_OPTION_ID
+        - name: GITHUB_PROJECT_DONE_OPTION_ID
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-github-settings
+              key: GITHUB_PROJECT_DONE_OPTION_ID
+        - name: GITHUB_PRIVATE_KEY_PATH
+          value: /var/run/secrets/github-app/private-key.pem
+        volumeMounts:
+        - name: github-app-key
+          mountPath: /var/run/secrets/github-app
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: github-app-key
+        secret:
+          secretName: codefactory-github-app
+          defaultMode: 440
+          items:
+          - key: private-key.pem
+            path: private-key.pem
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-service
+  labels:
+    app.kubernetes.io/name: github-service
+    app.kubernetes.io/part-of: codefactory
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: github-service
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP

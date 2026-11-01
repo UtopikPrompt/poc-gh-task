@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: codefactory
+resources:
+- ../../bases/platform
+- ../../bases/github-service
+- ../../bases/langgraph-service
+images:
+- name: codefactory/github-service
+  newName: ghcr.io/utopikprompt/poc-gh-task-github-service
+  newTag: dev
+- name: codefactory/langgraph-service
+  newName: ghcr.io/utopikprompt/poc-gh-task-langgraph-service
+  newTag: dev

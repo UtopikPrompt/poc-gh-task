@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codefactory-service-config
+data:
+  GITHUB_SERVICE_URL: http://github-service:8000
+  WORKER_POLL_SECONDS: "1"

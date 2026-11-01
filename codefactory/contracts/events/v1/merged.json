@@ -1,0 +1,30 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Pull request merged event",
+    "type": "object",
+    "required": [
+        "task_id",
+        "event_type",
+        "event_pull_request_id",
+        "merged",
+        "webhook_delivery_id"
+    ],
+    "properties": {
+        "task_id": {
+            "type": "string"
+        },
+        "event_type": {
+            "const": "merged"
+        },
+        "event_pull_request_id": {
+            "type": "string"
+        },
+        "merged": {
+            "type": "boolean"
+        },
+        "webhook_delivery_id": {
+            "type": "string"
+        }
+    },
+    "additionalProperties": true
+}

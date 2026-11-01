@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langgraph-service
+  labels:
+    app.kubernetes.io/name: langgraph-service
+    app.kubernetes.io/part-of: codefactory
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: langgraph-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: langgraph-service
+        app.kubernetes.io/part-of: codefactory
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: ghcr-pull-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: langgraph-service
+        image: codefactory/langgraph-service:dev
+        imagePullPolicy: Always
+        command:
+        - uvicorn
+        args:
+        - langgraph_service.host:create_app
+        - --factory
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8001"
+        ports:
+        - name: http
+          containerPort: 8001
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: codefactory-service-config
+        env:
+        - name: LANGGRAPH_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: LANGGRAPH_DATABASE_URL
+        - name: INTERNAL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: INTERNAL_SERVICE_TOKEN
+        - name: WORKFLOW_OPERATIONS_MODULE
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-langgraph-settings
+              key: WORKFLOW_OPERATIONS_MODULE
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 250m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langgraph-service
+  labels:
+    app.kubernetes.io/name: langgraph-service
+    app.kubernetes.io/part-of: codefactory
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: langgraph-service
+  ports:
+  - name: http
+    port: 8001
+    targetPort: http
+    protocol: TCP

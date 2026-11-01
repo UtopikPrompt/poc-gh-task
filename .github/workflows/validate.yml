@@ -1,0 +1,33 @@
+name: Validate projects
+
+on:
+    push:
+        paths:
+            - "codefactory/**"
+            - "infra-codefactory/**"
+            - "inference-platform/**"
+            - "Makefile"
+            - ".github/workflows/validate.yml"
+    pull_request:
+        paths:
+            - "codefactory/**"
+            - "infra-codefactory/**"
+            - "inference-platform/**"
+            - "Makefile"
+            - ".github/workflows/validate.yml"
+    workflow_dispatch:
+
+jobs:
+    validate:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+            - uses: azure/setup-kubectl@v4
+              with:
+                  version: "v1.31.0"
+            - run: python -m pip install --upgrade pip
+            - run: make install-dev
+            - run: make check

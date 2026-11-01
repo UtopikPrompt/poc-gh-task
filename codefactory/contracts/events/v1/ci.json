@@ -1,0 +1,54 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Pull request CI event",
+    "type": "object",
+    "required": [
+        "task_id",
+        "event_type",
+        "event_pull_request_id",
+        "ci_checks",
+        "ci_complete",
+        "webhook_delivery_id"
+    ],
+    "properties": {
+        "task_id": {
+            "type": "string"
+        },
+        "event_type": {
+            "const": "ci"
+        },
+        "event_pull_request_id": {
+            "type": "string"
+        },
+        "ci_checks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "status"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "enum": [
+                            "success",
+                            "pending",
+                            "failure"
+                        ]
+                    }
+                },
+                "additionalProperties": true
+            }
+        },
+        "ci_complete": {
+            "type": "boolean"
+        },
+        "webhook_delivery_id": {
+            "type": "string"
+        }
+    },
+    "additionalProperties": true
+}
