@@ -20,9 +20,6 @@ test = ["pytest>=8,<10", "ruff>=0.8,<1"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-github_service = ["migrations/*.sql"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

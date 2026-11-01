@@ -1,4 +1,2 @@
--r services/github-service/requirements.txt
--r services/langgraph-service/requirements.txt
 pytest>=8,<10
 ruff>=0.8,<1
