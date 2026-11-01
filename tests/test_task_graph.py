@@ -1,8 +1,7 @@
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
-
-from codefactory.langgraph_service.operations import WorkflowOperations
-from codefactory.langgraph_service.task_graph import build_task_graph
+from langgraph_service.operations import WorkflowOperations
+from langgraph_service.task_graph import build_task_graph
 
 
 def _operations(*, repair_changes=None):

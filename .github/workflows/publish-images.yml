@@ -1,0 +1,121 @@
+name: Build and publish service images
+
+on:
+    pull_request:
+    push:
+        branches:
+            - main
+    workflow_dispatch:
+        inputs:
+            channel:
+                description: Image channel to publish from main
+                required: true
+                default: dev
+                type: choice
+                options:
+                    - dev
+                    - staging
+                    - prod
+
+permissions:
+    contents: read
+
+jobs:
+    validate:
+        runs-on: ubuntu-latest
+        outputs:
+            channel: ${{ steps.channel.outputs.name }}
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+            - uses: azure/setup-kubectl@v4
+              with:
+                  version: "v1.31.0"
+            - id: channel
+              run: echo "name=$CHANNEL" >> "$GITHUB_OUTPUT"
+              env:
+                  CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
+            - run: python -m pip install --upgrade pip
+            - run: make install-dev
+            - run: make check
+
+    build-pr:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - context: codefactory/github-service
+                      image: ghcr.io/utopikprompt/poc-gh-task-github-service
+                    - context: codefactory/langgraph-service
+                      image: ghcr.io/utopikprompt/poc-gh-task-langgraph-service
+        steps:
+            - uses: actions/checkout@v4
+            - uses: docker/setup-buildx-action@v3
+            - uses: docker/build-push-action@v6
+              with:
+                  context: ${{ matrix.context }}
+                  push: false
+                  labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+    publish:
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        needs: validate
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            packages: write
+        environment:
+            name: ${{ needs.validate.outputs.channel }}
+        concurrency:
+            group: publish-${{ github.workflow }}-${{ github.ref }}-${{ matrix.image }}
+            cancel-in-progress: false
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - context: codefactory/github-service
+                      image: ghcr.io/utopikprompt/poc-gh-task-github-service
+                    - context: codefactory/langgraph-service
+                      image: ghcr.io/utopikprompt/poc-gh-task-langgraph-service
+        steps:
+            - uses: actions/checkout@v4
+            - uses: docker/setup-buildx-action@v3
+            - uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - id: sha-tag
+              env:
+                  IMAGE: ${{ matrix.image }}
+                  SHA_TAG: ${{ github.sha }}
+              run: |
+                  if output=$(docker buildx imagetools inspect "$IMAGE:$SHA_TAG" 2>&1); then
+                    echo "exists=true" >> "$GITHUB_OUTPUT"
+                  elif grep -Eqi 'manifest unknown|not found|no such manifest' <<< "$output"; then
+                    echo "exists=false" >> "$GITHUB_OUTPUT"
+                  else
+                    printf '%s\n' "$output" >&2
+                    exit 1
+                  fi
+            - if: steps.sha-tag.outputs.exists == 'false'
+              uses: docker/build-push-action@v6
+              with:
+                  context: ${{ matrix.context }}
+                  push: true
+                  tags: |
+                      ${{ matrix.image }}:${{ github.sha }}
+                      ${{ matrix.image }}:${{ needs.validate.outputs.channel }}
+                  labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            - if: steps.sha-tag.outputs.exists == 'true'
+              env:
+                  IMAGE: ${{ matrix.image }}
+                  SHA_TAG: ${{ github.sha }}
+                  CHANNEL: ${{ needs.validate.outputs.channel }}
+              run: docker buildx imagetools create --tag "$IMAGE:$CHANNEL" "$IMAGE:$SHA_TAG"

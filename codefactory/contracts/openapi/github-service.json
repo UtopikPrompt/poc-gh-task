@@ -1,0 +1,713 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Codefactory GitHub Service",
+        "version": "1.0.0",
+        "description": "Signed webhook intake and bearer-authenticated internal GitHub capabilities."
+    },
+    "paths": {
+        "/healthz": {
+            "get": {
+                "operationId": "healthz",
+                "responses": {
+                    "200": {
+                        "description": "Service health",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Health"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/webhooks/github": {
+            "post": {
+                "operationId": "receiveGitHubWebhook",
+                "parameters": [
+                    {
+                        "name": "x-github-event",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "x-github-delivery",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "x-hub-signature-256",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "description": "Provider webhook payload. Event-specific GitHub fields remain open; the signature covers the raw body.",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Delivery accepted, ignored, or already handled",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WebhookResult"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "413": {
+                        "$ref": "#/components/responses/PayloadTooLarge"
+                    },
+                    "500": {
+                        "$ref": "#/components/responses/ProcessingFailure"
+                    }
+                }
+            }
+        },
+        "/internal/events/claim": {
+            "post": {
+                "operationId": "claimEvent",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Leased event or null when the queue is empty",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ClaimResult"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/events/{event_id}/ack": {
+            "post": {
+                "operationId": "acknowledgeEvent",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/EventId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/ClaimToken"
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Acknowledged"
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/InvalidClaim"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/events/{event_id}/retry": {
+            "post": {
+                "operationId": "retryEvent",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/EventId"
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/RetryEvent"
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Retried"
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/InvalidClaim"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/github/publish-pr": {
+            "post": {
+                "operationId": "publishPullRequest",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/PublishPullRequest"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Created or previously registered pull request; provider-specific extra fields remain open.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PullRequestResult"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/github/complete-task": {
+            "post": {
+                "operationId": "completeTask",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/TaskId"
+                },
+                "responses": {
+                    "200": {
+                        "description": "Completion decision and the open GitHub update payload when completed.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CompletionResult"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer"
+            }
+        },
+        "parameters": {
+            "EventId": {
+                "name": "event_id",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string"
+                }
+            }
+        },
+        "requestBodies": {
+            "ClaimToken": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "claim_token"
+                            ],
+                            "properties": {
+                                "claim_token": {
+                                    "type": "string",
+                                    "minLength": 1
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "RetryEvent": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "claim_token",
+                                "error"
+                            ],
+                            "properties": {
+                                "claim_token": {
+                                    "type": "string",
+                                    "minLength": 1
+                                },
+                                "error": {
+                                    "type": "string",
+                                    "description": "The service truncates stored error text to 2000 characters."
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "PublishPullRequest": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "task_id",
+                                "title",
+                                "body",
+                                "head",
+                                "base"
+                            ],
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Must contain non-whitespace text."
+                                },
+                                "body": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Must contain non-whitespace text."
+                                },
+                                "head": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Must contain non-whitespace text."
+                                },
+                                "base": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Must contain non-whitespace text."
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "TaskId": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "task_id"
+                            ],
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
+        "schemas": {
+            "Health": {
+                "type": "object",
+                "required": [
+                    "status"
+                ],
+                "properties": {
+                    "status": {
+                        "const": "ok"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "WebhookResult": {
+                "type": "object",
+                "required": [
+                    "status",
+                    "delivery_id"
+                ],
+                "properties": {
+                    "status": {
+                        "enum": [
+                            "queued",
+                            "ignored",
+                            "duplicate",
+                            "in_progress"
+                        ]
+                    },
+                    "delivery_id": {
+                        "type": "string"
+                    },
+                    "event_count": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "event_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ClaimResult": {
+                "type": "object",
+                "required": [
+                    "event"
+                ],
+                "properties": {
+                    "event": {
+                        "oneOf": [
+                            {
+                                "$ref": "#/components/schemas/ClaimedEvent"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ClaimedEvent": {
+                "type": "object",
+                "required": [
+                    "event_id",
+                    "delivery_id",
+                    "claim_token",
+                    "attempt",
+                    "payload"
+                ],
+                "properties": {
+                    "event_id": {
+                        "type": "string"
+                    },
+                    "delivery_id": {
+                        "type": "string"
+                    },
+                    "claim_token": {
+                        "type": "string"
+                    },
+                    "attempt": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "payload": {
+                        "oneOf": [
+                            {
+                                "$ref": "../events/v1/ready.json"
+                            },
+                            {
+                                "$ref": "../events/v1/ci.json"
+                            },
+                            {
+                                "$ref": "../events/v1/merged.json"
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "PullRequestResult": {
+                "type": "object",
+                "required": [
+                    "pull_request_id",
+                    "repository",
+                    "number"
+                ],
+                "properties": {
+                    "pull_request_id": {
+                        "type": "string"
+                    },
+                    "repository": {
+                        "type": "string"
+                    },
+                    "number": {
+                        "type": "integer"
+                    },
+                    "url": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": true
+            },
+            "CompletionResult": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": [
+                            "completed",
+                            "reason"
+                        ],
+                        "properties": {
+                            "completed": {
+                                "const": false
+                            },
+                            "reason": {
+                                "enum": [
+                                    "task_mapping_unavailable",
+                                    "task_mapping_invalid",
+                                    "merge_or_checks_unverified"
+                                ]
+                            }
+                        },
+                        "additionalProperties": true
+                    },
+                    {
+                        "type": "object",
+                        "required": [
+                            "completed",
+                            "project_update"
+                        ],
+                        "properties": {
+                            "completed": {
+                                "const": true
+                            },
+                            "project_update": {
+                                "type": "object",
+                                "additionalProperties": true
+                            }
+                        },
+                        "additionalProperties": true
+                    }
+                ]
+            }
+        },
+        "responses": {
+            "Acknowledged": {
+                "description": "Event acknowledged",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "acknowledged"
+                            ],
+                            "properties": {
+                                "acknowledged": {
+                                    "const": true
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                }
+            },
+            "Retried": {
+                "description": "Event retry scheduled",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "retried"
+                            ],
+                            "properties": {
+                                "retried": {
+                                    "const": true
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                }
+            },
+            "BadRequest": {
+                "description": "Request is invalid",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "detail"
+                            ],
+                            "properties": {
+                                "detail": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "Unauthorized": {
+                "description": "Signature or bearer authentication failed",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "detail"
+                            ],
+                            "properties": {
+                                "detail": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "InvalidClaim": {
+                "description": "The event claim is no longer valid",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "detail"
+                            ],
+                            "properties": {
+                                "detail": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "Unavailable": {
+                "description": "Internal API capability is unavailable",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "detail"
+                            ],
+                            "properties": {
+                                "detail": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "PayloadTooLarge": {
+                "description": "Webhook body exceeds the configured byte limit",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "detail"
+                            ],
+                            "properties": {
+                                "detail": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "ProcessingFailure": {
+                "description": "Webhook processing failed",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "detail"
+                            ],
+                            "properties": {
+                                "detail": {
+                                    "type": "string"
+                                }
+                            },
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

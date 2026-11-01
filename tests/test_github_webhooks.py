@@ -3,8 +3,7 @@ import hmac
 import json
 
 import pytest
-
-from codefactory.github_service.webhooks import (
+from github_service.webhooks import (
     WebhookAuthenticationError,
     decode_github_webhook,
 )

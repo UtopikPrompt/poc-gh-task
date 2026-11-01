@@ -4,9 +4,8 @@ import httpx
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-
-from codefactory.github_service.github_app import GitHubAppClient
-from codefactory.langgraph_service.task_graph import TaskState
+from github_service.github_app import GitHubAppClient
+from langgraph_service.task_graph import TaskState
 
 
 def _client(tmp_path, transport):

@@ -1,32 +1,66 @@
-# poc-gh-task
+# Codefactory Monorepo
 LangGraph multi-repo task platform on Kubernetes
 
 ## Services
 
-`codefactory.github_service` and `codefactory.langgraph_service` are independently runnable services. The GitHub service verifies public webhooks, normalizes events, owns the durable event ledger and queue, provides bounded GitHub App capabilities, and is the only service that writes Project status. The LangGraph service claims durable events, owns graph execution/checkpoints, and requests PR publication or completion through the authenticated GitHub-service API. There is no Redis or Kafka dependency.
+This repository contains three independently owned projects. `codefactory/` contains the GitHub and LangGraph services, their API/event contracts, integration tests, and architecture documentation. `infra-codefactory/` contains Kubernetes bases and environment overlays for those services. `inference-platform/` owns model-serving code, inference Kubernetes resources, and inference documentation.
 
-Production uses PostgreSQL. GitHub ledger/queue tables live in the `github_service` schema; LangGraph checkpoint tables live in `langgraph_service`. Apply `github_service/migrations/001_github_event_queue.sql`, then `langgraph_service/migrations/001_checkpoint_schema.sql`, then `github_service/migrations/002_service_roles.sql` with an operator-controlled database administration identity. The runtime services use separate PostgreSQL URLs and restricted database roles. Configure login roles, grants, network policy, TLS, and secret delivery for your environment; no database password or service token is embedded here.
+The GitHub service verifies public webhooks, normalizes events, owns the durable event ledger and queue, provides bounded GitHub App capabilities, and is the only service that writes Project status. The LangGraph service claims durable events, owns graph execution/checkpoints, and requests PR publication or completion through the authenticated GitHub-service API. They communicate through authenticated HTTP; there is no shared Python implementation, Redis, or Kafka dependency.
+
+Production uses PostgreSQL. GitHub ledger/queue tables live in the `github_service` schema; LangGraph checkpoint tables live in `langgraph_service`. Apply `codefactory/github-service/src/github_service/migrations/001_github_event_queue.sql`, then `codefactory/langgraph-service/src/langgraph_service/migrations/001_checkpoint_schema.sql`, then `codefactory/github-service/src/github_service/migrations/002_service_roles.sql` with an operator-controlled database administration identity. The runtime services use separate PostgreSQL URLs and restricted database roles. Configure login roles, grants, network policy, TLS, and secret delivery for your environment; no database password or service token is embedded here.
 
 Run the services independently with Uvicorn after configuring their environment:
 
 ```sh
-uvicorn codefactory.github_service.host:create_app --factory --host 0.0.0.0 --port 8000
-uvicorn codefactory.langgraph_service.host:create_app --factory --host 0.0.0.0 --port 8001
+PYTHONPATH=codefactory/github-service/src uvicorn github_service.host:create_app --factory --host 0.0.0.0 --port 8000
+PYTHONPATH=codefactory/langgraph-service/src uvicorn langgraph_service.host:create_app --factory --host 0.0.0.0 --port 8001
 ```
 
+Optionally build service images locally with each service as the build context:
+
+```sh
+docker build -t codefactory/github-service:dev codefactory/github-service
+docker build -t codefactory/langgraph-service:dev codefactory/langgraph-service
+```
+
+Local Docker is not required for validation or deployment image publishing. The
+GitHub Actions workflow builds both images for pull requests without pushing.
+On pushes to `main`, it validates the repository and then publishes to GHCR;
+manual runs from `main` can publish the `dev`, `staging`, or `prod` channel.
+Each publish uses the lowercase packages
+`ghcr.io/utopikprompt/poc-gh-task-github-service` and
+`ghcr.io/utopikprompt/poc-gh-task-langgraph-service`, tagged with the full commit
+SHA and the selected channel. The SHA tag is retained on reruns and channel tags
+are moved to the selected commit.
+
+Configure the GitHub Actions environments named `dev`, `staging`, and `prod`.
+Set required reviewers and restrict deployment branches to `main` for staging
+and production as appropriate. To publish a staging or production build, use
+Actions > Build and publish service images > Run workflow, select branch `main`,
+and choose the channel; the workflow waits for any configured environment
+approval. Registry packages remain private and the workflow uses its
+`GITHUB_TOKEN`, not a repository PAT.
+
+Before deploying, create the namespaced `ghcr-pull-secret` in `codefactory` as
+described in [infra-codefactory/README.md](infra-codefactory/README.md). The
+cluster needs a GHCR credential with package read access; no credential values
+are stored here.
+
 The LangGraph service requires an operator-owned `WORKFLOW_OPERATIONS_MODULE` exporting `make_operations() -> WorkflowOperations`. The injected operations perform bounded context gathering, planning, risk assessment, change preparation, and optional repair. `prepare_changes` returns `pull_request_title`, `pull_request_body`, `head_branch`, and `base_branch`; PR creation itself is a GitHub-service capability scoped to the repository resolved from the Project event. Plugins must be safe to retry and must not invoke shell/process commands, merge PRs, or write target branches.
+
+The LangGraph image does not include that operator-owned module. Make it available as an importable module at build time or runtime, for example in an operator-built image or on a runtime-mounted Python module path. Supply credentials and other secrets through runtime secret management, not image build arguments or image contents.
 
 GitHub-native repository rules must require all applicable PR checks before a human can merge. Following a merge webhook, GitHub service fetches the current PR identity/state and current check results again; it updates the mapped Project task to `done` only when the matching PR is merged and all reported checks are successful. LangGraph has no Project-write or merge capability.
 
 ## Local Development And Tests
 
-Install the runtime and local test dependencies in a virtual environment, then run the suite:
+Install the independently declared service test dependencies in a virtual environment, then run the complete suite and checks:
 
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -r requirements-dev.txt
-pytest -q
+make install-dev
+make check
 ```
 
 Tests use temporary SQLite files, mocked PostgreSQL connections, and GitHub API fixtures. They cover delivery idempotency, queue leasing/retries, authenticated service contracts, check gating, PR publication scoping, and the completion boundary. They make no live GitHub, PostgreSQL, or cluster requests. SQLite is for local development/tests only; production hosts require the PostgreSQL DSNs.
@@ -56,5 +90,7 @@ Subscribe the GitHub App to organization `projects_v2_item` deliveries and repos
 
 ## Architecture notes
 
-- Design document: [docs/langgraph-kubernetes-github-project-issue.md](docs/langgraph-kubernetes-github-project-issue.md)
+- Design document: [codefactory/docs/langgraph-kubernetes-github-project-issue.md](codefactory/docs/langgraph-kubernetes-github-project-issue.md)
+- Inference project: [inference-platform/README.md](inference-platform/README.md)
+- Service deployment overlays: [infra-codefactory/kubernetes/environments](infra-codefactory/kubernetes/environments)
 - This repository captures the architecture for a multi-repository workflow platform built around LangGraph orchestration, bounded specialized workers, model-role routing, and Kubernetes-based execution isolation.

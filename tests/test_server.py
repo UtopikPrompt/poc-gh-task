@@ -3,19 +3,18 @@ import hmac
 import json
 
 from fastapi.testclient import TestClient
-
-from codefactory.github_service.bootstrap import create_app, create_github_app
-from codefactory.github_service.completion import GitHubTaskCompletion
-from codefactory.github_service.events import (
+from github_service.bootstrap import create_app, create_github_app
+from github_service.completion import GitHubTaskCompletion
+from github_service.events import (
     GitHubEventNormalizer,
     GitHubWebhook,
     ProjectEventConfig,
 )
-from codefactory.github_service.publishing import GitHubTaskPublisher
-from codefactory.github_service.settings import RuntimeSettings
-from codefactory.langgraph_service.operations import WorkflowOperations
-from codefactory.langgraph_service.service import LangGraphTaskService
-from codefactory.langgraph_service.worker import LangGraphEventWorker
+from github_service.publishing import GitHubTaskPublisher
+from github_service.settings import RuntimeSettings
+from langgraph_service.operations import WorkflowOperations
+from langgraph_service.service import LangGraphTaskService
+from langgraph_service.worker import LangGraphEventWorker
 
 
 class FakeGitHubEventAPI:
@@ -370,9 +369,7 @@ def test_github_app_factory_starts_without_workflow_operations(tmp_path, monkeyp
         def close(self):
             pass
 
-    monkeypatch.setattr(
-        "codefactory.github_service.bootstrap.GitHubAppClient", FakeAppClient
-    )
+    monkeypatch.setattr("github_service.bootstrap.GitHubAppClient", FakeAppClient)
     app = create_github_app(
         settings=RuntimeSettings(
             github_webhook_secret="integration-secret",

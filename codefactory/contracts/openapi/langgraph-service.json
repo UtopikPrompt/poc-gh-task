@@ -1,0 +1,36 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Codefactory LangGraph Service",
+        "version": "1.0.0",
+        "description": "The worker exposes health only; event and GitHub operations use the GitHub Service contract."
+    },
+    "paths": {
+        "/healthz": {
+            "get": {
+                "operationId": "healthz",
+                "responses": {
+                    "200": {
+                        "description": "Service health",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "status"
+                                    ],
+                                    "properties": {
+                                        "status": {
+                                            "const": "ok"
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
