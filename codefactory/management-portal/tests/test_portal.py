@@ -91,25 +91,12 @@ def _oauth_response(request):
             200,
             json={
                 "state": "active",
+                "role": "member",
                 "organization": {"login": GITHUB_ORGANIZATION},
             },
         )
     if request.url.path == "/user":
         return httpx.Response(200, json={"login": "approved-member"})
-    if request.url.path == "/graphql":
-        return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "organization": {
-                        "membersWithRole": {
-                            "nodes": [{"login": "approved-owner"}],
-                            "pageInfo": {"endCursor": None, "hasNextPage": False},
-                        }
-                    }
-                }
-            },
-        )
     return httpx.Response(404)
 
 
@@ -245,45 +232,17 @@ def test_only_verified_organization_owner_can_update_agent_config(tmp_path):
     requests = []
 
     def owner_oauth_response(request):
-        if request.url.path == "/user":
-            return httpx.Response(200, json={"login": "verified-owner"})
-        if request.url.path == "/graphql":
-            query = json.loads(request.content)
-            assert "role: OWNER" in query["query"]
-            if query["variables"]["cursor"] is None:
-                return httpx.Response(
-                    200,
-                    json={
-                        "data": {
-                            "organization": {
-                                "membersWithRole": {
-                                    "nodes": [{"login": "another-owner"}],
-                                    "pageInfo": {
-                                        "endCursor": "owner-page-2",
-                                        "hasNextPage": True,
-                                    },
-                                }
-                            }
-                        }
-                    },
-                )
-            assert query["variables"]["cursor"] == "owner-page-2"
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
             return httpx.Response(
                 200,
                 json={
-                    "data": {
-                        "organization": {
-                            "membersWithRole": {
-                                "nodes": [{"login": "verified-owner"}],
-                                "pageInfo": {
-                                    "endCursor": None,
-                                    "hasNextPage": False,
-                                },
-                            }
-                        }
-                    }
+                    "state": "active",
+                    "role": "admin",
+                    "organization": {"login": GITHUB_ORGANIZATION},
                 },
             )
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "verified-owner"})
         return _oauth_response(request)
 
     def langgraph_response(request):
@@ -425,8 +384,14 @@ def test_unverifiable_github_owner_role_fails_closed(tmp_path):
     app = _create_app(tmp_path)
 
     def failed_role_lookup(request):
-        if request.url.path == "/graphql":
-            return httpx.Response(200, json={"errors": [{"message": "denied"}]})
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
+            return httpx.Response(
+                200,
+                json={
+                    "state": "active",
+                    "organization": {"login": GITHUB_ORGANIZATION},
+                },
+            )
         return _oauth_response(request)
 
     app.state.oauth_http_transport = httpx.MockTransport(failed_role_lookup)
@@ -440,119 +405,22 @@ def test_unverifiable_github_owner_role_fails_closed(tmp_path):
     )
 
 
-def _owner_lookup_failure_cases():
-    marker = "owner-response-sensitive-marker"
-    connection = {
-        "nodes": [],
-        "pageInfo": {"endCursor": None, "hasNextPage": False},
-    }
-
-    def page(*, nodes=None, page_info=None):
-        return {
-            "data": {
-                "organization": {
-                    "membersWithRole": {
-                        "nodes": connection["nodes"] if nodes is None else nodes,
-                        "pageInfo": (
-                            connection["pageInfo"] if page_info is None else page_info
-                        ),
-                    }
-                }
-            }
-        }
-
-    repeated_cursor_page = page(page_info={"endCursor": marker, "hasNextPage": True})
-    page_limit_responses = [
-        page(page_info={"endCursor": f"cursor-{index}", "hasNextPage": True})
-        for index in range(50)
-    ]
-    return [
-        pytest.param(
-            [("text", marker)], "response_json_decode_failed", id="json-decode"
-        ),
-        pytest.param([("json", marker)], "response_not_object", id="non-object"),
-        pytest.param(
-            [("json", {"errors": [{"message": marker}]})],
-            "graphql_errors_present",
-            id="graphql-errors",
-        ),
-        pytest.param(
-            [("json", {"errors": marker})],
-            "graphql_errors_shape_invalid",
-            id="graphql-errors-shape",
-        ),
-        pytest.param(
-            [("json", {"data": marker})], "response_data_shape_invalid", id="data-shape"
-        ),
-        pytest.param(
-            [("json", {"data": {"organization": marker}})],
-            "organization_shape_invalid",
-            id="organization-shape",
-        ),
-        pytest.param(
-            [("json", {"data": {"organization": {"membersWithRole": marker}}})],
-            "members_connection_shape_invalid",
-            id="connection-shape",
-        ),
-        pytest.param(
-            [("json", page(nodes=marker))], "nodes_shape_invalid", id="nodes-shape"
-        ),
-        pytest.param(
-            [("json", page(page_info=marker))],
-            "page_info_shape_invalid",
-            id="page-info-shape",
-        ),
-        pytest.param(
-            [("json", page(page_info={"endCursor": None, "hasNextPage": marker}))],
-            "has_next_page_shape_invalid",
-            id="has-next-page-shape",
-        ),
-        pytest.param(
-            [("json", page(nodes=[marker]))], "node_shape_invalid", id="node-shape"
-        ),
-        pytest.param(
-            [("json", page(nodes=[{"login": None}]))],
-            "login_shape_invalid",
-            id="login-shape",
-        ),
-        pytest.param(
-            [("json", page(page_info={"hasNextPage": True}))],
-            "cursor_missing",
-            id="cursor-missing",
-        ),
-        pytest.param(
-            [("json", page(page_info={"endCursor": 1, "hasNextPage": True}))],
-            "cursor_shape_invalid",
-            id="cursor-shape",
-        ),
-        pytest.param(
-            [("json", repeated_cursor_page), ("json", repeated_cursor_page)],
-            "cursor_repeated",
-            id="cursor-repeated",
-        ),
-        pytest.param(
-            [("json", response) for response in page_limit_responses],
-            "page_limit_exceeded",
-            id="page-limit",
-        ),
-    ]
-
-
-@pytest.mark.parametrize(
-    ("graphql_responses", "reason_code"), _owner_lookup_failure_cases()
-)
-def test_owner_role_lookup_failures_log_fixed_reasons_without_response_data(
-    tmp_path, caplog, graphql_responses, reason_code
+@pytest.mark.parametrize("role", [None, "sensitive-role-marker", 1, [], {}])
+def test_invalid_organization_role_logs_fixed_reason_without_response_data(
+    tmp_path, caplog, role
 ):
     app = _create_app(tmp_path)
-    responses = iter(graphql_responses)
 
     def failed_owner_lookup(request):
-        if request.url.path == "/graphql":
-            kind, payload = next(responses)
-            if kind == "text":
-                return httpx.Response(200, text=payload)
-            return httpx.Response(200, json=payload)
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
+            return httpx.Response(
+                200,
+                json={
+                    "state": "active",
+                    "role": role,
+                    "organization": {"login": GITHUB_ORGANIZATION},
+                },
+            )
         return _oauth_response(request)
 
     app.state.oauth_http_transport = httpx.MockTransport(failed_owner_lookup)
@@ -564,13 +432,13 @@ def test_owner_role_lookup_failures_log_fixed_reasons_without_response_data(
     state = parse_qs(urlsplit(login_response.headers["location"]).query)["state"][0]
     assert callback_response.status_code == 502
     assert "temporarily unavailable" in callback_response.text
-    assert "phase=owner_role_lookup" in caplog.text
-    assert "exception_class=OwnerRoleLookupError" in caplog.text
+    assert "phase=organization_membership_check" in caplog.text
+    assert "exception_class=OrganizationRoleLookupError" in caplog.text
     assert "upstream_status=200" in caplog.text
-    assert f"reason_code={reason_code}" in caplog.text
+    assert "reason_code=organization_role_shape_invalid" in caplog.text
     assert all(record.exc_info is None for record in caplog.records)
     for sensitive_value in (
-        "owner-response-sensitive-marker",
+        "sensitive-role-marker",
         OAUTH_CLIENT_SECRET,
         OAUTH_ACCESS_TOKEN,
         "authorization-code",
@@ -592,7 +460,6 @@ def test_owner_role_lookup_failures_log_fixed_reasons_without_response_data(
             "organization_membership_check",
         ),
         ("/user", "user_lookup"),
-        ("/graphql", "owner_role_lookup"),
     ],
 )
 def test_oauth_phase_failures_log_only_allowlisted_diagnostics(
@@ -756,23 +623,6 @@ def test_inactive_or_incorrect_organization_membership_is_denied(tmp_path, caplo
                 f"/user/memberships/orgs/{GITHUB_ORGANIZATION}"
             ):
                 return httpx.Response(status_code, json=membership)
-            if request.url.path == "/graphql":
-                return httpx.Response(
-                    200,
-                    json={
-                        "data": {
-                            "organization": {
-                                "membersWithRole": {
-                                    "nodes": [],
-                                    "pageInfo": {
-                                        "endCursor": None,
-                                        "hasNextPage": False,
-                                    },
-                                }
-                            }
-                        }
-                    },
-                )
             return httpx.Response(200, json={"login": "unapproved-member"})
 
         app.state.oauth_http_transport = httpx.MockTransport(response_for_membership)

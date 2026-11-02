@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Callable
 from contextvars import ContextVar
 import hashlib
 import hmac
@@ -30,22 +29,7 @@ SAFE_AUTH_CONFIGURATION_ERROR = "Dashboard authentication is not configured"
 OAUTH_FAILURE_REASON_CODES = frozenset(
     {
         "not_applicable",
-        "response_json_decode_failed",
-        "response_not_object",
-        "graphql_errors_present",
-        "graphql_errors_shape_invalid",
-        "response_data_shape_invalid",
-        "organization_shape_invalid",
-        "members_connection_shape_invalid",
-        "nodes_shape_invalid",
-        "page_info_shape_invalid",
-        "has_next_page_shape_invalid",
-        "node_shape_invalid",
-        "login_shape_invalid",
-        "cursor_missing",
-        "cursor_shape_invalid",
-        "cursor_repeated",
-        "page_limit_exceeded",
+        "organization_role_shape_invalid",
     }
 )
 OAUTH_CALLBACK_QUERY: ContextVar[dict[str, list[str]] | None] = ContextVar(
@@ -65,7 +49,7 @@ class OrganizationMembershipDenied(Exception):
         self.upstream_status = upstream_status
 
 
-class OwnerRoleLookupError(ValueError):
+class OrganizationRoleLookupError(ValueError):
     def __init__(self, reason_code: str):
         if reason_code not in OAUTH_FAILURE_REASON_CODES:
             raise ValueError("Invalid OAuth diagnostic reason code")
@@ -270,6 +254,8 @@ async def github_organization_member_login(
                 raise OrganizationMembershipDenied(upstream_status)
             membership_response.raise_for_status()
             membership = membership_response.json()
+            if not isinstance(membership, dict):
+                raise OrganizationRoleLookupError("organization_role_shape_invalid")
             organization = membership.get("organization", {})
             if (
                 membership.get("state") != "active"
@@ -278,6 +264,14 @@ async def github_organization_member_login(
                 != GITHUB_ORGANIZATION.casefold()
             ):
                 raise OrganizationMembershipDenied(upstream_status)
+            role = membership.get("role")
+            if not isinstance(role, str) or role not in {
+                "admin",
+                "member",
+                "billing_manager",
+            }:
+                raise OrganizationRoleLookupError("organization_role_shape_invalid")
+            is_owner = role == "admin"
 
             phase = "user_lookup"
             upstream_status = None
@@ -289,96 +283,7 @@ async def github_organization_member_login(
             if not isinstance(login, str) or not login:
                 raise ValueError("GitHub account unavailable")
 
-            phase = "owner_role_lookup"
-            upstream_status = None
-            is_owner = await _github_organization_owner(
-                client,
-                api_url=api_url,
-                headers=headers,
-                login=login,
-                record_upstream_status=record_upstream_status,
-            )
             return login, is_owner
     except Exception as error:
         _log_oauth_phase_failure(phase, error, upstream_status)
         raise
-
-
-async def _github_organization_owner(
-    client: httpx.AsyncClient,
-    *,
-    api_url: str,
-    headers: dict[str, str],
-    login: str,
-    record_upstream_status: Callable[[int], None],
-) -> bool:
-    query = """
-    query OrganizationOwners($organization: String!, $cursor: String) {
-      organization(login: $organization) {
-        membersWithRole(first: 100, role: OWNER, after: $cursor) {
-          nodes { login }
-          pageInfo { endCursor hasNextPage }
-        }
-      }
-    }
-    """
-    cursor = None
-    for _ in range(50):
-        response = await client.post(
-            f"{api_url}/graphql",
-            headers=headers,
-            json={
-                "query": query,
-                "variables": {"organization": GITHUB_ORGANIZATION, "cursor": cursor},
-            },
-        )
-        record_upstream_status(response.status_code)
-        response.raise_for_status()
-        try:
-            result = response.json()
-        except (json.JSONDecodeError, UnicodeError):
-            raise OwnerRoleLookupError("response_json_decode_failed") from None
-        if not isinstance(result, dict):
-            raise OwnerRoleLookupError("response_not_object")
-        if "errors" in result:
-            errors = result["errors"]
-            if not isinstance(errors, list):
-                raise OwnerRoleLookupError("graphql_errors_shape_invalid")
-            if errors:
-                raise OwnerRoleLookupError("graphql_errors_present")
-        data = result.get("data")
-        if not isinstance(data, dict):
-            raise OwnerRoleLookupError("response_data_shape_invalid")
-        organization = data.get("organization")
-        if not isinstance(organization, dict):
-            raise OwnerRoleLookupError("organization_shape_invalid")
-        connection = organization.get("membersWithRole")
-        if not isinstance(connection, dict):
-            raise OwnerRoleLookupError("members_connection_shape_invalid")
-        nodes = connection.get("nodes")
-        if not isinstance(nodes, list):
-            raise OwnerRoleLookupError("nodes_shape_invalid")
-        page_info = connection.get("pageInfo")
-        if not isinstance(page_info, dict):
-            raise OwnerRoleLookupError("page_info_shape_invalid")
-        has_next_page = page_info.get("hasNextPage")
-        if not isinstance(has_next_page, bool):
-            raise OwnerRoleLookupError("has_next_page_shape_invalid")
-        for node in nodes:
-            if not isinstance(node, dict):
-                raise OwnerRoleLookupError("node_shape_invalid")
-            if not isinstance(node.get("login"), str):
-                raise OwnerRoleLookupError("login_shape_invalid")
-        if any(node["login"].casefold() == login.casefold() for node in nodes):
-            return True
-        if not has_next_page:
-            return False
-        if "endCursor" not in page_info or page_info["endCursor"] in (None, ""):
-            raise OwnerRoleLookupError("cursor_missing")
-        next_cursor = page_info["endCursor"]
-        if not isinstance(next_cursor, str):
-            raise OwnerRoleLookupError("cursor_shape_invalid")
-        if next_cursor == cursor:
-            raise OwnerRoleLookupError("cursor_repeated")
-        cursor = next_cursor
-    raise OwnerRoleLookupError("page_limit_exceeded")
