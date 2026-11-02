@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from contextvars import ContextVar
 import hashlib
 import hmac
 import json
+import logging
 import time
 from urllib.parse import parse_qs
 
@@ -28,6 +30,7 @@ SAFE_AUTH_CONFIGURATION_ERROR = "Dashboard authentication is not configured"
 OAUTH_CALLBACK_QUERY: ContextVar[dict[str, list[str]] | None] = ContextVar(
     "oauth_callback_query", default=None
 )
+logger = logging.getLogger(__name__)
 
 
 def oauth_state_cookie_name(state: str) -> str:
@@ -36,7 +39,24 @@ def oauth_state_cookie_name(state: str) -> str:
 
 
 class OrganizationMembershipDenied(Exception):
-    pass
+    def __init__(self, upstream_status: int | None = None):
+        super().__init__()
+        self.upstream_status = upstream_status
+
+
+def _log_oauth_phase_failure(
+    phase: str,
+    error: Exception,
+    upstream_status: int | None,
+) -> None:
+    if upstream_status is None and isinstance(error, httpx.HTTPStatusError):
+        upstream_status = error.response.status_code
+    logger.warning(
+        "OAuth callback phase failed phase=%s exception_class=%s upstream_status=%s",
+        phase,
+        type(error).__name__,
+        upstream_status if upstream_status is not None else "unavailable",
+    )
 
 
 def install_oauth_callback_query_redaction(app: FastAPI) -> None:
@@ -167,65 +187,87 @@ async def github_organization_member_login(
     code: str,
 ) -> tuple[str, bool]:
     transport = getattr(request.app.state, "oauth_http_transport", None)
-    async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
-        token_response = await client.post(
-            GITHUB_OAUTH_TOKEN_URL,
-            data={
-                "client_id": settings.github_oauth_client_id,
-                "client_secret": settings.github_oauth_client_secret,
-                "code": code,
-                "redirect_uri": settings.github_oauth_callback_url,
-            },
-            headers={"Accept": "application/json"},
-        )
-        token_response.raise_for_status()
-        token_data = token_response.json()
-        access_token = token_data.get("access_token")
-        scopes = token_data.get("scope", "")
-        if (
-            not isinstance(access_token, str)
-            or not access_token
-            or not isinstance(scopes, str)
-            or "read:org" not in scopes.split(",")
-        ):
-            raise ValueError("required OAuth authorization unavailable")
+    phase = "token_exchange"
+    upstream_status = None
 
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {access_token}",
-            "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        }
-        api_url = settings.github_api_url.rstrip("/")
-        membership_response = await client.get(
-            f"{api_url}/user/memberships/orgs/{GITHUB_ORGANIZATION}",
-            headers=headers,
-        )
-        if membership_response.status_code in {403, 404}:
-            raise OrganizationMembershipDenied
-        membership_response.raise_for_status()
-        membership = membership_response.json()
-        organization = membership.get("organization", {})
-        if (
-            membership.get("state") != "active"
-            or not isinstance(organization, dict)
-            or organization.get("login", "").casefold()
-            != GITHUB_ORGANIZATION.casefold()
-        ):
-            raise OrganizationMembershipDenied
+    def record_upstream_status(status_code: int) -> None:
+        nonlocal upstream_status
+        upstream_status = status_code
 
-        user_response = await client.get(f"{api_url}/user", headers=headers)
-        user_response.raise_for_status()
-        user = user_response.json()
-        login = user.get("login")
-        if not isinstance(login, str) or not login:
-            raise ValueError("GitHub account unavailable")
-        is_owner = await _github_organization_owner(
-            client,
-            api_url=api_url,
-            headers=headers,
-            login=login,
-        )
-        return login, is_owner
+    try:
+        async with httpx.AsyncClient(transport=transport, timeout=10.0) as client:
+            token_response = await client.post(
+                GITHUB_OAUTH_TOKEN_URL,
+                data={
+                    "client_id": settings.github_oauth_client_id,
+                    "client_secret": settings.github_oauth_client_secret,
+                    "code": code,
+                    "redirect_uri": settings.github_oauth_callback_url,
+                },
+                headers={"Accept": "application/json"},
+            )
+            upstream_status = token_response.status_code
+            token_response.raise_for_status()
+            token_data = token_response.json()
+            access_token = token_data.get("access_token")
+            scopes = token_data.get("scope", "")
+            if (
+                not isinstance(access_token, str)
+                or not access_token
+                or not isinstance(scopes, str)
+                or "read:org" not in scopes.split(",")
+            ):
+                raise ValueError("required OAuth authorization unavailable")
+
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {access_token}",
+                "X-GitHub-Api-Version": GITHUB_API_VERSION,
+            }
+            api_url = settings.github_api_url.rstrip("/")
+            phase = "organization_membership_check"
+            upstream_status = None
+            membership_response = await client.get(
+                f"{api_url}/user/memberships/orgs/{GITHUB_ORGANIZATION}",
+                headers=headers,
+            )
+            upstream_status = membership_response.status_code
+            if membership_response.status_code in {403, 404}:
+                raise OrganizationMembershipDenied(upstream_status)
+            membership_response.raise_for_status()
+            membership = membership_response.json()
+            organization = membership.get("organization", {})
+            if (
+                membership.get("state") != "active"
+                or not isinstance(organization, dict)
+                or organization.get("login", "").casefold()
+                != GITHUB_ORGANIZATION.casefold()
+            ):
+                raise OrganizationMembershipDenied(upstream_status)
+
+            phase = "user_lookup"
+            upstream_status = None
+            user_response = await client.get(f"{api_url}/user", headers=headers)
+            upstream_status = user_response.status_code
+            user_response.raise_for_status()
+            user = user_response.json()
+            login = user.get("login")
+            if not isinstance(login, str) or not login:
+                raise ValueError("GitHub account unavailable")
+
+            phase = "owner_role_lookup"
+            upstream_status = None
+            is_owner = await _github_organization_owner(
+                client,
+                api_url=api_url,
+                headers=headers,
+                login=login,
+                record_upstream_status=record_upstream_status,
+            )
+            return login, is_owner
+    except Exception as error:
+        _log_oauth_phase_failure(phase, error, upstream_status)
+        raise
 
 
 async def _github_organization_owner(
@@ -234,6 +276,7 @@ async def _github_organization_owner(
     api_url: str,
     headers: dict[str, str],
     login: str,
+    record_upstream_status: Callable[[int], None],
 ) -> bool:
     query = """
     query OrganizationOwners($organization: String!, $cursor: String) {
@@ -255,6 +298,7 @@ async def _github_organization_owner(
                 "variables": {"organization": GITHUB_ORGANIZATION, "cursor": cursor},
             },
         )
+        record_upstream_status(response.status_code)
         response.raise_for_status()
         result = response.json()
         data = result.get("data") if isinstance(result, dict) else None

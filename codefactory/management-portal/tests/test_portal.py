@@ -1,8 +1,10 @@
 import json
+import logging
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import pytest
 from jsonschema import Draft202012Validator
 from fastapi.testclient import TestClient
 from management_portal.auth import (
@@ -438,6 +440,54 @@ def test_unverifiable_github_owner_role_fails_closed(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    ("failure_path", "phase"),
+    [
+        ("/login/oauth/access_token", "token_exchange"),
+        (
+            f"/user/memberships/orgs/{GITHUB_ORGANIZATION}",
+            "organization_membership_check",
+        ),
+        ("/user", "user_lookup"),
+        ("/graphql", "owner_role_lookup"),
+    ],
+)
+def test_oauth_phase_failures_log_only_allowlisted_diagnostics(
+    tmp_path, caplog, failure_path, phase
+):
+    app = _create_app(tmp_path)
+    sensitive_error = "sensitive-upstream-error-marker"
+
+    def failed_phase_response(request):
+        if request.url.path == failure_path:
+            return httpx.Response(502, text=sensitive_error)
+        return _oauth_response(request)
+
+    app.state.oauth_http_transport = httpx.MockTransport(failed_phase_response)
+    caplog.set_level(logging.WARNING, logger="management_portal.auth")
+
+    with TestClient(app, base_url="https://testserver") as client:
+        login_response, callback_response = _login(client)
+
+    state = parse_qs(urlsplit(login_response.headers["location"]).query)["state"][0]
+    assert callback_response.status_code == 502
+    assert "temporarily unavailable" in callback_response.text
+    assert phase in caplog.text
+    assert "HTTPStatusError" in caplog.text
+    assert "upstream_status=502" in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+    for sensitive_value in (
+        OAUTH_CLIENT_SECRET,
+        OAUTH_ACCESS_TOKEN,
+        "authorization-code",
+        state,
+        sensitive_error,
+        GITHUB_OAUTH_CALLBACK_URL,
+    ):
+        assert sensitive_value not in caplog.text
+        assert sensitive_value not in callback_response.text
+
+
 def test_dashboard_auth_fails_closed_without_oauth_configuration(tmp_path):
     app = _create_app(tmp_path, oauth=False)
 
@@ -544,7 +594,8 @@ def test_logout_clears_the_dashboard_session_cookie(tmp_path):
     assert dashboard_response.status_code == 303
 
 
-def test_inactive_or_incorrect_organization_membership_is_denied(tmp_path):
+def test_inactive_or_incorrect_organization_membership_is_denied(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="management_portal.auth")
     for status_code, membership in (
         (200, {"state": "pending", "organization": {"login": GITHUB_ORGANIZATION}}),
         (200, {"state": "active", "organization": {"login": "OtherOrganization"}}),
@@ -582,8 +633,17 @@ def test_inactive_or_incorrect_organization_membership_is_denied(tmp_path):
             return httpx.Response(200, json={"login": "unapproved-member"})
 
         app.state.oauth_http_transport = httpx.MockTransport(response_for_membership)
+        caplog.clear()
         with TestClient(app, base_url="https://testserver") as client:
-            _, callback_response = _login(client)
+            login_response, callback_response = _login(client)
 
+        state = parse_qs(urlsplit(login_response.headers["location"]).query)["state"][0]
         assert callback_response.status_code == 403
         assert OAUTH_ACCESS_TOKEN not in callback_response.text
+        assert "phase=organization_membership_check" in caplog.text
+        assert "exception_class=OrganizationMembershipDenied" in caplog.text
+        assert f"upstream_status={status_code}" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+        for sensitive_value in (OAUTH_CLIENT_SECRET, OAUTH_ACCESS_TOKEN, state):
+            assert sensitive_value not in caplog.text
+        assert "authorization-code" not in caplog.text
