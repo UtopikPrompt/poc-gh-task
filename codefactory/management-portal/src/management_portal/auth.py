@@ -27,6 +27,27 @@ DASHBOARD_SESSION_SECONDS = 3600
 DASHBOARD_STATE_SECONDS = 600
 GITHUB_API_VERSION = "2022-11-28"
 SAFE_AUTH_CONFIGURATION_ERROR = "Dashboard authentication is not configured"
+OAUTH_FAILURE_REASON_CODES = frozenset(
+    {
+        "not_applicable",
+        "response_json_decode_failed",
+        "response_not_object",
+        "graphql_errors_present",
+        "graphql_errors_shape_invalid",
+        "response_data_shape_invalid",
+        "organization_shape_invalid",
+        "members_connection_shape_invalid",
+        "nodes_shape_invalid",
+        "page_info_shape_invalid",
+        "has_next_page_shape_invalid",
+        "node_shape_invalid",
+        "login_shape_invalid",
+        "cursor_missing",
+        "cursor_shape_invalid",
+        "cursor_repeated",
+        "page_limit_exceeded",
+    }
+)
 OAUTH_CALLBACK_QUERY: ContextVar[dict[str, list[str]] | None] = ContextVar(
     "oauth_callback_query", default=None
 )
@@ -44,6 +65,14 @@ class OrganizationMembershipDenied(Exception):
         self.upstream_status = upstream_status
 
 
+class OwnerRoleLookupError(ValueError):
+    def __init__(self, reason_code: str):
+        if reason_code not in OAUTH_FAILURE_REASON_CODES:
+            raise ValueError("Invalid OAuth diagnostic reason code")
+        super().__init__()
+        self.reason_code = reason_code
+
+
 def _log_oauth_phase_failure(
     phase: str,
     error: Exception,
@@ -51,11 +80,16 @@ def _log_oauth_phase_failure(
 ) -> None:
     if upstream_status is None and isinstance(error, httpx.HTTPStatusError):
         upstream_status = error.response.status_code
+    reason_code = getattr(error, "reason_code", "not_applicable")
+    if reason_code not in OAUTH_FAILURE_REASON_CODES:
+        reason_code = "not_applicable"
     logger.warning(
-        "OAuth callback phase failed phase=%s exception_class=%s upstream_status=%s",
+        "OAuth callback phase failed phase=%s exception_class=%s "
+        "upstream_status=%s reason_code=%s",
         phase,
         type(error).__name__,
         upstream_status if upstream_status is not None else "unavailable",
+        reason_code,
     )
 
 
@@ -300,35 +334,51 @@ async def _github_organization_owner(
         )
         record_upstream_status(response.status_code)
         response.raise_for_status()
-        result = response.json()
-        data = result.get("data") if isinstance(result, dict) else None
-        organization = data.get("organization") if isinstance(data, dict) else None
-        connection = (
-            organization.get("membersWithRole")
-            if isinstance(organization, dict)
-            else None
-        )
-        nodes = connection.get("nodes") if isinstance(connection, dict) else None
-        page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
-        if (
-            not isinstance(result, dict)
-            or result.get("errors")
-            or not isinstance(nodes, list)
-            or not isinstance(page_info, dict)
-            or not isinstance(page_info.get("hasNextPage"), bool)
-        ):
-            raise ValueError("GitHub organization owner role could not be verified")
-        if any(
-            not isinstance(node, dict) or not isinstance(node.get("login"), str)
-            for node in nodes
-        ):
-            raise ValueError("GitHub organization owner role could not be verified")
+        try:
+            result = response.json()
+        except (json.JSONDecodeError, UnicodeError):
+            raise OwnerRoleLookupError("response_json_decode_failed") from None
+        if not isinstance(result, dict):
+            raise OwnerRoleLookupError("response_not_object")
+        if "errors" in result:
+            errors = result["errors"]
+            if not isinstance(errors, list):
+                raise OwnerRoleLookupError("graphql_errors_shape_invalid")
+            if errors:
+                raise OwnerRoleLookupError("graphql_errors_present")
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise OwnerRoleLookupError("response_data_shape_invalid")
+        organization = data.get("organization")
+        if not isinstance(organization, dict):
+            raise OwnerRoleLookupError("organization_shape_invalid")
+        connection = organization.get("membersWithRole")
+        if not isinstance(connection, dict):
+            raise OwnerRoleLookupError("members_connection_shape_invalid")
+        nodes = connection.get("nodes")
+        if not isinstance(nodes, list):
+            raise OwnerRoleLookupError("nodes_shape_invalid")
+        page_info = connection.get("pageInfo")
+        if not isinstance(page_info, dict):
+            raise OwnerRoleLookupError("page_info_shape_invalid")
+        has_next_page = page_info.get("hasNextPage")
+        if not isinstance(has_next_page, bool):
+            raise OwnerRoleLookupError("has_next_page_shape_invalid")
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise OwnerRoleLookupError("node_shape_invalid")
+            if not isinstance(node.get("login"), str):
+                raise OwnerRoleLookupError("login_shape_invalid")
         if any(node["login"].casefold() == login.casefold() for node in nodes):
             return True
-        if not page_info["hasNextPage"]:
+        if not has_next_page:
             return False
-        next_cursor = page_info.get("endCursor")
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
-            raise ValueError("GitHub organization owner role could not be verified")
+        if "endCursor" not in page_info or page_info["endCursor"] in (None, ""):
+            raise OwnerRoleLookupError("cursor_missing")
+        next_cursor = page_info["endCursor"]
+        if not isinstance(next_cursor, str):
+            raise OwnerRoleLookupError("cursor_shape_invalid")
+        if next_cursor == cursor:
+            raise OwnerRoleLookupError("cursor_repeated")
         cursor = next_cursor
-    raise ValueError("GitHub organization owner role could not be verified")
+    raise OwnerRoleLookupError("page_limit_exceeded")
