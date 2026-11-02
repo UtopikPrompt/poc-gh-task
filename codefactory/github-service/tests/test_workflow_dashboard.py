@@ -8,12 +8,6 @@ import httpx
 from jsonschema import Draft202012Validator
 from fastapi.testclient import TestClient
 from github_service.bootstrap import create_app
-from github_service.management_portal.auth import (
-    DASHBOARD_SESSION_SECONDS,
-    DASHBOARD_STATE_SECONDS,
-    GITHUB_OAUTH_CALLBACK_URL,
-    GITHUB_ORGANIZATION,
-)
 from github_service.settings import RuntimeSettings
 
 OAUTH_CLIENT_SECRET = "oauth-client-secret-marker"
