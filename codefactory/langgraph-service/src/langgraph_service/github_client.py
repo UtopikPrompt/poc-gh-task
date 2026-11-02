@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Mapping, Sequence
 from typing import Literal, TypedDict
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+CLAIM_MAX_ATTEMPTS = 3
+CLAIM_RETRY_BASE_SECONDS = 0.25
 
 
 class ProposedFileChange(TypedDict):
@@ -35,8 +42,29 @@ class GitHubServiceClient:
         )
 
     def claim_event(self) -> dict[str, object] | None:
-        response = self._client.post("/internal/events/claim")
-        response.raise_for_status()
+        for attempt in range(1, CLAIM_MAX_ATTEMPTS + 1):
+            try:
+                response = self._client.post("/internal/events/claim")
+                response.raise_for_status()
+                break
+            except httpx.ConnectTimeout:
+                if attempt == CLAIM_MAX_ATTEMPTS:
+                    logger.error(
+                        "GitHub event claim failed after %d connection attempts",
+                        attempt,
+                        exc_info=True,
+                    )
+                    raise
+                delay = CLAIM_RETRY_BASE_SECONDS * 2 ** (attempt - 1)
+                logger.warning(
+                    "GitHub event claim connection timed out; retrying attempt "
+                    "%d/%d in %.2f seconds",
+                    attempt + 1,
+                    CLAIM_MAX_ATTEMPTS,
+                    delay,
+                    exc_info=True,
+                )
+                time.sleep(delay)
         result = response.json()
         event = result.get("event") if isinstance(result, Mapping) else None
         return dict(event) if isinstance(event, Mapping) else None

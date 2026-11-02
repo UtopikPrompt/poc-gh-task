@@ -33,10 +33,11 @@ class FakeGitHubEventAPI:
         assert installation_id == 654
         return {
             "project_node_id": "PVT_test_project",
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
             "status_field_name": "Status",
             "status_option_name": "Ready",
             "done_option_name": "Done",
-            "is_target_project": True,
             "is_archived": False,
             "issue": {
                 "number": 42,
@@ -443,9 +444,10 @@ def test_github_app_factory_starts_without_workflow_operations(tmp_path, monkeyp
             assert installation_id == 654
             return {
                 "project_node_id": "PVT_test_project",
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
                 "status_field_name": "Status",
                 "status_option_name": "Ready",
-                "is_target_project": True,
                 "issue": {"repository": "example/project", "number": 42},
             }
 
@@ -458,9 +460,6 @@ def test_github_app_factory_starts_without_workflow_operations(tmp_path, monkeyp
             github_webhook_secret="integration-secret",
             database_path=tmp_path / "workflow.sqlite",
             github_app_id=321,
-            github_project_owner="example-org",
-            github_project_owner_type="organization",
-            github_project_number=7,
         ),
     )
 
@@ -468,7 +467,7 @@ def test_github_app_factory_starts_without_workflow_operations(tmp_path, monkeyp
         assert client.get("/healthz").json() == {"status": "ok"}
 
 
-def test_github_app_factory_requires_explicit_project_identity(tmp_path):
+def test_github_app_factory_requires_app_credentials(tmp_path):
     settings = RuntimeSettings(
         github_webhook_secret="integration-secret",
         database_path=tmp_path / "workflow.sqlite",
@@ -479,4 +478,4 @@ def test_github_app_factory_requires_explicit_project_identity(tmp_path):
     except ValueError as error:
         assert "GitHub App settings are missing" in str(error)
     else:
-        raise AssertionError("GitHub App factory must require App and Project identity")
+        raise AssertionError("GitHub App factory must require App credentials")

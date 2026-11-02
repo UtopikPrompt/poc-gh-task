@@ -16,6 +16,100 @@ from github_service.events import normalize_installation_id
 DeliveryClaim = Literal["claimed", "duplicate", "in_progress"]
 
 
+def _workflow_summary(row: Any) -> dict[str, object]:
+    state = str(row["state"])
+    return {
+        "task_id": str(row["task_id"]),
+        "issue_number": None,
+        "repository": row["repository"],
+        "pull_request_number": (
+            int(row["pull_request_number"])
+            if row["pull_request_number"] is not None
+            else None
+        ),
+        "pull_request_id": row["pull_request_id"],
+        "latest_event": str(row["event_type"]),
+        "latest_event_at": str(row["created_at"]),
+        "status": {
+            "pending": "queued",
+            "processing": "processing",
+            "processed": "processed",
+            "dead": "failed",
+        }.get(state, "unavailable"),
+        "attempts": int(row["attempts"]),
+        "has_failure": bool(row["has_failure"]),
+    }
+
+
+def _ready_task_context(event: Mapping[str, object]) -> dict[str, object] | None:
+    if event.get("event_type") != "ready":
+        return None
+    project_owner = event.get("project_owner")
+    project_owner_type = event.get("project_owner_type")
+    project_node_id = event.get("project_node_id")
+    project_item_id = event.get("project_item_id")
+    repositories = event.get("target_repositories")
+    if (
+        not isinstance(project_owner, str)
+        or not project_owner.strip()
+        or project_owner_type not in {"organization", "user"}
+        or not isinstance(project_node_id, str)
+        or not project_node_id
+        or not isinstance(project_item_id, str)
+        or not project_item_id
+        or not isinstance(repositories, list)
+        or len(repositories) != 1
+        or not isinstance(repositories[0], str)
+        or not repositories[0].strip()
+    ):
+        raise ValueError("ready event is missing its immutable Project context")
+    return {
+        "project_owner": project_owner,
+        "project_owner_type": project_owner_type,
+        "project_node_id": project_node_id,
+        "project_item_id": project_item_id,
+        "target_repository": repositories[0],
+        "installation_id": normalize_installation_id(event.get("installation_id")),
+    }
+
+
+def _validate_stored_task_context(task_id: str, row: Any) -> None:
+    values = {
+        key: row[key]
+        for key in (
+            "project_owner",
+            "project_owner_type",
+            "project_node_id",
+            "project_item_id",
+            "target_repository",
+            "installation_id",
+        )
+    }
+    installation_id = values["installation_id"]
+    try:
+        normalize_installation_id(installation_id)
+    except ValueError as error:
+        raise ValueError(
+            f"stored task context for {task_id!r} is incomplete or invalid"
+        ) from error
+    if (
+        not isinstance(values["project_owner"], str)
+        or not values["project_owner"].strip()
+        or values["project_owner_type"] not in {"organization", "user"}
+        or any(
+            not isinstance(values[key], str) or not values[key].strip()
+            for key in (
+                "project_node_id",
+                "project_item_id",
+                "target_repository",
+            )
+        )
+    ):
+        raise ValueError(
+            f"stored task context for {task_id!r} is incomplete or invalid"
+        )
+
+
 class SQLiteDeliveryStore:
     """Local-only implementation used by tests and developer runs."""
 
@@ -62,7 +156,9 @@ class SQLiteDeliveryStore:
                 project_node_id TEXT NOT NULL,
                 project_item_id TEXT NOT NULL,
                 target_repository TEXT NOT NULL,
-                installation_id INTEGER
+                installation_id INTEGER,
+                project_owner TEXT,
+                project_owner_type TEXT
             );
             CREATE INDEX IF NOT EXISTS task_event_outbox_ready
                 ON task_event_outbox(state, available_at, lease_until);
@@ -79,9 +175,20 @@ class SQLiteDeliveryStore:
             row["name"]
             for row in self._connection.execute("PRAGMA table_info(task_contexts)")
         }
-        if "installation_id" not in context_columns:
-            self._connection.execute(
-                "ALTER TABLE task_contexts ADD COLUMN installation_id INTEGER"
+        required_context_columns = {
+            "project_node_id",
+            "project_item_id",
+            "target_repository",
+            "installation_id",
+            "project_owner",
+            "project_owner_type",
+        }
+        missing_context_columns = required_context_columns - context_columns
+        if missing_context_columns:
+            self._connection.close()
+            missing = ", ".join(sorted(missing_context_columns))
+            raise RuntimeError(
+                f"SQLite task_contexts schema is missing required columns: {missing}"
             )
 
     def claim_delivery(self, delivery_id: str) -> DeliveryClaim:
@@ -133,6 +240,35 @@ class SQLiteDeliveryStore:
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 for ordinal, event in enumerate(events):
+                    task_context = _ready_task_context(event)
+                    if task_context is not None:
+                        previous_event = self._connection.execute(
+                            "SELECT event_id FROM task_event_inbox "
+                            "WHERE delivery_id = ? AND ordinal = ?",
+                            (delivery_id, ordinal),
+                        ).fetchone()
+                        if previous_event is not None:
+                            event_ids.append(str(previous_event["event_id"]))
+                            continue
+                        context = self._connection.execute(
+                            "SELECT project_owner, project_owner_type, "
+                            "project_node_id, project_item_id, target_repository, "
+                            "installation_id FROM task_contexts WHERE task_id = ?",
+                            (str(event["task_id"]),),
+                        ).fetchone()
+                        if context is not None:
+                            _validate_stored_task_context(
+                                str(event["task_id"]), context
+                            )
+                            if any(
+                                context[key] != value
+                                for key, value in task_context.items()
+                            ):
+                                raise ValueError(
+                                    "ready event conflicts with immutable task context"
+                                )
+                            continue
+
                     event_id = str(uuid.uuid4())
                     self._connection.execute(
                         "INSERT OR IGNORE INTO task_event_inbox "
@@ -157,45 +293,37 @@ class SQLiteDeliveryStore:
                         "INSERT OR IGNORE INTO task_event_outbox (event_id) VALUES (?)",
                         (event_id,),
                     )
-                    project_node_id = event.get("project_node_id")
-                    project_item_id = event.get("project_item_id")
-                    repositories = event.get("target_repositories")
-                    if (
-                        event.get("event_type") == "ready"
-                        and isinstance(project_node_id, str)
-                        and isinstance(project_item_id, str)
-                        and isinstance(repositories, list)
-                        and len(repositories) == 1
-                        and isinstance(repositories[0], str)
-                    ):
-                        installation_id = normalize_installation_id(
-                            event.get("installation_id")
-                        )
+                    if task_context is not None:
                         self._connection.execute(
                             "INSERT INTO task_contexts "
-                            "(task_id, project_node_id, project_item_id, "
-                            "target_repository, installation_id) "
-                            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(task_id) DO NOTHING",
+                            "(task_id, project_owner, project_owner_type, "
+                            "project_node_id, project_item_id, target_repository, "
+                            "installation_id) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(task_id) DO NOTHING",
                             (
                                 str(event["task_id"]),
-                                project_node_id,
-                                project_item_id,
-                                repositories[0],
-                                installation_id,
+                                task_context["project_owner"],
+                                task_context["project_owner_type"],
+                                task_context["project_node_id"],
+                                task_context["project_item_id"],
+                                task_context["target_repository"],
+                                task_context["installation_id"],
                             ),
                         )
                         context = self._connection.execute(
-                            "SELECT project_node_id, project_item_id, "
-                            "target_repository, installation_id FROM task_contexts "
+                            "SELECT project_owner, project_owner_type, "
+                            "project_node_id, project_item_id, target_repository, "
+                            "installation_id FROM task_contexts "
                             "WHERE task_id = ?",
                             (str(event["task_id"]),),
                         ).fetchone()
-                        if (
-                            context is None
-                            or context["project_node_id"] != project_node_id
-                            or context["project_item_id"] != project_item_id
-                            or context["target_repository"] != repositories[0]
-                            or context["installation_id"] != installation_id
+                        if context is None:
+                            raise ValueError(
+                                "ready event conflicts with immutable task context"
+                            )
+                        _validate_stored_task_context(str(event["task_id"]), context)
+                        if any(
+                            context[key] != value for key, value in task_context.items()
                         ):
                             raise ValueError(
                                 "ready event conflicts with immutable task context"
@@ -373,20 +501,45 @@ class SQLiteDeliveryStore:
     def task_context(self, task_id: str) -> dict[str, str] | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT project_node_id, project_item_id, target_repository, "
-                "installation_id "
+                "SELECT project_owner, project_owner_type, project_node_id, "
+                "project_item_id, target_repository, installation_id "
                 "FROM task_contexts "
                 "WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
-        if row is None or row["installation_id"] is None:
+        if row is None:
             return None
+        _validate_stored_task_context(task_id, row)
         return {
+            "project_owner": str(row["project_owner"]),
+            "project_owner_type": str(row["project_owner_type"]),
             "project_node_id": str(row["project_node_id"]),
             "project_item_id": str(row["project_item_id"]),
             "target_repository": str(row["target_repository"]),
             "installation_id": str(row["installation_id"]),
         }
+
+    def list_workflows(self) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "WITH latest AS ("
+                " SELECT i.task_id, i.event_type, i.created_at, i.ordinal, "
+                " o.state, o.attempts, (o.last_error IS NOT NULL) AS has_failure, "
+                " ROW_NUMBER() OVER (PARTITION BY i.task_id "
+                " ORDER BY i.created_at DESC, i.ordinal DESC) AS position "
+                " FROM task_event_inbox i "
+                " JOIN task_event_outbox o USING (event_id)"
+                ") SELECT latest.task_id, latest.event_type, latest.created_at, "
+                " latest.state, latest.attempts, latest.has_failure, "
+                " COALESCE(context.target_repository, pr.repository) AS repository, "
+                " pr.pull_request_number, pr.pull_request_id "
+                " FROM latest "
+                " LEFT JOIN task_contexts context USING (task_id) "
+                " LEFT JOIN pull_request_tasks pr USING (task_id) "
+                " WHERE latest.position = 1 "
+                " ORDER BY latest.created_at DESC, latest.ordinal DESC"
+            ).fetchall()
+        return [_workflow_summary(row) for row in rows]
 
     @contextmanager
     def publication_lock(self, task_id: str):
@@ -475,6 +628,39 @@ class PostgresDeliveryStore:
         event_ids: list[str] = []
         with self._connection() as connection, connection.cursor() as cursor:
             for ordinal, event in enumerate(events):
+                task_context = _ready_task_context(event)
+                if task_context is not None:
+                    cursor.execute(
+                        "SELECT event_id FROM github_service.task_event_inbox "
+                        "WHERE delivery_id = %s AND ordinal = %s",
+                        (delivery_id, ordinal),
+                    )
+                    previous_event = cursor.fetchone()
+                    if previous_event is not None:
+                        event_ids.append(str(previous_event["event_id"]))
+                        continue
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (str(event["task_id"]),),
+                    )
+                    cursor.execute(
+                        "SELECT project_owner, project_owner_type, project_node_id, "
+                        "project_item_id, target_repository, installation_id "
+                        "FROM github_service.task_contexts WHERE task_id = %s "
+                        "FOR UPDATE",
+                        (str(event["task_id"]),),
+                    )
+                    context = cursor.fetchone()
+                    if context is not None:
+                        _validate_stored_task_context(str(event["task_id"]), context)
+                        if any(
+                            context[key] != value for key, value in task_context.items()
+                        ):
+                            raise ValueError(
+                                "ready event conflicts with immutable task context"
+                            )
+                        continue
+
                 event_id = str(uuid.uuid4())
                 cursor.execute(
                     "INSERT INTO github_service.task_event_inbox "
@@ -505,48 +691,38 @@ class PostgresDeliveryStore:
                     "VALUES (%s) ON CONFLICT (event_id) DO NOTHING",
                     (event_id,),
                 )
-                project_node_id = event.get("project_node_id")
-                project_item_id = event.get("project_item_id")
-                repositories = event.get("target_repositories")
-                if (
-                    event.get("event_type") == "ready"
-                    and isinstance(project_node_id, str)
-                    and isinstance(project_item_id, str)
-                    and isinstance(repositories, list)
-                    and len(repositories) == 1
-                    and isinstance(repositories[0], str)
-                ):
-                    installation_id = normalize_installation_id(
-                        event.get("installation_id")
-                    )
+                if task_context is not None:
                     cursor.execute(
                         "INSERT INTO github_service.task_contexts "
-                        "(task_id, project_node_id, project_item_id, "
-                        "target_repository, installation_id) "
-                        "VALUES (%s, %s, %s, %s, %s) "
+                        "(task_id, project_owner, project_owner_type, "
+                        "project_node_id, project_item_id, target_repository, "
+                        "installation_id) VALUES (%s, %s, %s, %s, %s, %s, %s) "
                         "ON CONFLICT(task_id) DO NOTHING",
                         (
                             str(event["task_id"]),
-                            project_node_id,
-                            project_item_id,
-                            repositories[0],
-                            installation_id,
+                            task_context["project_owner"],
+                            task_context["project_owner_type"],
+                            task_context["project_node_id"],
+                            task_context["project_item_id"],
+                            task_context["target_repository"],
+                            task_context["installation_id"],
                         ),
                     )
                     cursor.execute(
-                        "SELECT project_node_id, project_item_id, "
-                        "target_repository, installation_id "
+                        "SELECT project_owner, project_owner_type, project_node_id, "
+                        "project_item_id, target_repository, installation_id "
                         "FROM github_service.task_contexts "
                         "WHERE task_id = %s FOR UPDATE",
                         (str(event["task_id"]),),
                     )
                     context = cursor.fetchone()
-                    if (
-                        context is None
-                        or context["project_node_id"] != project_node_id
-                        or context["project_item_id"] != project_item_id
-                        or context["target_repository"] != repositories[0]
-                        or context["installation_id"] != installation_id
+                    if context is None:
+                        raise ValueError(
+                            "ready event conflicts with immutable task context"
+                        )
+                    _validate_stored_task_context(str(event["task_id"]), context)
+                    if any(
+                        context[key] != value for key, value in task_context.items()
                     ):
                         raise ValueError(
                             "ready event conflicts with immutable task context"
@@ -718,20 +894,46 @@ class PostgresDeliveryStore:
     def task_context(self, task_id: str) -> dict[str, str] | None:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT project_node_id, project_item_id, target_repository, "
-                "installation_id "
+                "SELECT project_owner, project_owner_type, project_node_id, "
+                "project_item_id, target_repository, installation_id "
                 "FROM github_service.task_contexts WHERE task_id = %s",
                 (task_id,),
             )
             row = cursor.fetchone()
-            if row is None or row["installation_id"] is None:
+            if row is None:
                 return None
+            _validate_stored_task_context(task_id, row)
             return {
+                "project_owner": str(row["project_owner"]),
+                "project_owner_type": str(row["project_owner_type"]),
                 "project_node_id": str(row["project_node_id"]),
                 "project_item_id": str(row["project_item_id"]),
                 "target_repository": str(row["target_repository"]),
                 "installation_id": str(row["installation_id"]),
             }
+
+    def list_workflows(self) -> list[dict[str, object]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "WITH latest AS ("
+                " SELECT i.task_id, i.event_type, i.created_at, i.ordinal, "
+                " o.state, o.attempts, (o.last_error IS NOT NULL) AS has_failure, "
+                " ROW_NUMBER() OVER (PARTITION BY i.task_id "
+                " ORDER BY i.created_at DESC, i.ordinal DESC) AS position "
+                " FROM github_service.task_event_inbox i "
+                " JOIN github_service.task_event_outbox o USING (event_id)"
+                ") SELECT latest.task_id, latest.event_type, latest.created_at, "
+                " latest.state, latest.attempts, latest.has_failure, "
+                " COALESCE(context.target_repository, pr.repository) AS repository, "
+                " pr.pull_request_number, pr.pull_request_id "
+                " FROM latest "
+                " LEFT JOIN github_service.task_contexts context USING (task_id) "
+                " LEFT JOIN github_service.pull_request_tasks pr USING (task_id) "
+                " WHERE latest.position = 1 "
+                " ORDER BY latest.created_at DESC, latest.ordinal DESC"
+            )
+            rows = cursor.fetchall()
+        return [_workflow_summary(row) for row in rows]
 
     @contextmanager
     def publication_lock(self, task_id: str):

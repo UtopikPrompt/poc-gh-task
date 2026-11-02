@@ -474,8 +474,9 @@ class GitHubTaskPublisher:
         item = self._github.get_project_item(item_id, installation_id)
         issue = item.get("issue")
         if (
-            item.get("is_target_project") is not True
-            or item.get("project_node_id") != project_id
+            item.get("project_node_id") != project_id
+            or item.get("project_owner") != context.get("project_owner")
+            or item.get("project_owner_type") != context.get("project_owner_type")
             or item.get("is_archived") is not False
             or not isinstance(issue, Mapping)
             or issue.get("state") != "OPEN"

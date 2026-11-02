@@ -297,18 +297,21 @@ The platform’s trust model depends on explicit guardrails.
 ### 5.1 Identity and repository boundaries
 
 - Use granular GitHub App permissions minimized to the minimum necessary for the defined PR workflow and task context; do not grant excessive access.
-- Before enabling source context and proposals, the App uses `Contents: Read` for candidate-tree and file reads and needs effective repository `Contents: Read and write` (which includes read) for Git Data objects and task-branch refs; also grant `Pull requests: Read and write`, `Issues: Read`, and `Projects: Read` for the configured Project owner. Repository metadata read is required and included by GitHub as a baseline permission. These are deployment prerequisites only; repository configuration does not prove that the installed App has these grants or selected-repository access. Verify the actual installation in GitHub before use. Do not grant a ruleset or branch-protection bypass; the base branch is never written by this service.
+- Before enabling source context and proposals, the App uses `Contents: Read` for candidate-tree and file reads and needs effective repository `Contents: Read and write` (which includes read) for Git Data objects and task-branch refs; also grant `Pull requests: Read and write`, `Issues: Read`, and `Projects: Read` for linked Project owners. Repository metadata read is required and included by GitHub as a baseline permission. These are deployment prerequisites only; repository configuration does not prove that the installed App has these grants or selected-repository access. Verify the actual installation in GitHub before use. Do not grant a ruleset or branch-protection bypass; the base branch is never written by this service.
 - GitHub App installation and grants of selected-repository access across organizations are managed by GitHub's native organization and repository administration. The platform consumes the access granted to the App; it does not independently authorize organization installation or grant repository access.
 - Separate service accounts for orchestration, execution, and validation.
 - Treat GitHub App credentials as operationally sensitive and rotate them according to policy.
 
-The GitHub service is configured with the App ID and target Project owner login,
-owner kind, and Project number. It resolves the Project node, status field, and
-status option IDs by their configured names through GraphQL and fails closed on
-missing or ambiguous results. Each signed webhook must provide a positive
-installation ID; the service persists it immutably with task context and uses
-that installation for later PR, check, and completion calls. No static
-installation ID or opaque Project/field/option IDs are configuration.
+The GitHub service resolves each Project item by node ID using the event's
+installation. GraphQL supplies the Project ID, owner login/type, status field,
+and option IDs; the linked issue repository is then checked through the same
+installation's REST API. Only a Ready item whose issue repository is accessible
+to that installation is accepted. Organization and user Project owners are
+supported when Project data is visible to the installation; missing Project
+access or repository authorization fails closed. Project owner/type/ID, item
+ID, repository, and installation are persisted immutably with the task, and
+completion revalidates and updates that same item. No global Project owner or
+number and no static installation ID are configuration.
 
 ### 5.2 Runtime isolation
 
@@ -394,7 +397,7 @@ The `codefactory-database-migrations` Job copies the SQL migration files from th
 
 The LangGraph-to-GitHub API is bearer-authenticated. Its bounded capabilities are queue claim/ack/retry, typed file-change proposals, and task completion. GitHub Service alone derives repository and Project context from GitHub-owned records, applies proposals to its deterministic task branch, and creates or reuses the verified PR. LangGraph cannot choose repository/base/head/PR identity, call the GitHub App directly, merge, write branches, or run shell/process commands. The GitHub service re-fetches the matching PR and current check/status results after a merge webhook and writes `done` only when the PR is closed and merged and all returned checks are successful. GitHub branch/ruleset configuration remains responsible for blocking human merge until every repository-required check succeeds; configure and verify that separately.
 
-SQLite and mocked-connection tests validate local behavior and PostgreSQL claim SQL, not a live PostgreSQL server. Operators provide the PostgreSQL admin and service passwords, webhook secret, internal token, GitHub App private key and App ID, and Project configuration. The installation ID comes from the signed webhook and is persisted with task context; it is not an operator-configured fallback. The Project node ID is derived from the resolved webhook item. The external HTTPS Ingress remains a platform responsibility: choose its hostname, TLS certificate/secret policy, and Ingress class, then configure the matching GitHub App webhook URL. The bundled `langgraph_service.workflow_operations` factory uses the local llama.cpp `/completion` provider and authenticated task-scoped source APIs. Configure `LLAMA_CPP_URL` to the internal inference service; the default is `http://llama-cpp-server.inference.svc.cluster.local:8080`. Install the inference deployment and model artifacts, verify model load and service readiness, and only then enable Codefactory task intake. The inference/GPU workload is deployed separately and is not included in Codefactory overlays. The required App grants remain an external deployment prerequisite. No cloud provider or workload sizing is bundled or implied.
+SQLite and mocked-connection tests validate local behavior and PostgreSQL claim SQL, not a live PostgreSQL server. Operators provide the PostgreSQL admin and service passwords, webhook secret, internal token, GitHub App private key and App ID. Optional Project status field and option-name overrides configure matching, not Project identity. The installation ID comes from the signed webhook and is persisted with task context; it is not an operator-configured fallback. The Project node ID is derived from the resolved webhook item. The external HTTPS Ingress remains a platform responsibility: choose its hostname, TLS certificate/secret policy, and Ingress class, then configure the matching GitHub App webhook URL. The bundled `langgraph_service.workflow_operations` factory uses the local llama.cpp `/completion` provider and authenticated task-scoped source APIs. Configure `LLAMA_CPP_URL` to the internal inference service; the default is `http://llama-cpp-server.inference.svc.cluster.local:8080`. Install the inference deployment and model artifacts, verify model load and service readiness, and only then enable Codefactory task intake. The inference/GPU workload is deployed separately and is not included in Codefactory overlays. The required App grants remain an external deployment prerequisite. No cloud provider or workload sizing is bundled or implied.
 
 ## 7. Observability and operations
 

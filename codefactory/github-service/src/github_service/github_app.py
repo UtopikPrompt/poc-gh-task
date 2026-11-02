@@ -31,9 +31,6 @@ class GitHubAppClient:
         app_id: int,
         private_key_path: Path,
         api_url: str = "https://api.github.com",
-        project_owner: str,
-        project_owner_type: str,
-        project_number: int,
         status_field_name: str = "Status",
         ready_option_name: str = "Ready",
         done_option_name: str = "Done",
@@ -41,21 +38,12 @@ class GitHubAppClient:
     ):
         if app_id <= 0:
             raise ValueError("GITHUB_APP_ID must be a positive integer")
-        if not project_owner.strip():
-            raise ValueError("GITHUB_PROJECT_OWNER must be configured")
-        if project_owner_type not in {"organization", "user"}:
-            raise ValueError("GITHUB_PROJECT_OWNER_TYPE must be organization or user")
-        if project_number <= 0:
-            raise ValueError("GITHUB_PROJECT_NUMBER must be a positive integer")
         if not all(
             name.strip()
             for name in (status_field_name, ready_option_name, done_option_name)
         ):
             raise ValueError("GitHub Project status names must not be empty")
         self._app_id = app_id
-        self._project_owner = project_owner.strip()
-        self._project_owner_type = project_owner_type
-        self._project_number = project_number
         self._status_field_name = status_field_name
         self._ready_option_name = ready_option_name
         self._done_option_name = done_option_name
@@ -78,24 +66,16 @@ class GitHubAppClient:
         required = {
             "GITHUB_APP_ID": settings.github_app_id,
             "GITHUB_PRIVATE_KEY_PATH": settings.github_private_key_path,
-            "GITHUB_PROJECT_OWNER": settings.github_project_owner,
-            "GITHUB_PROJECT_OWNER_TYPE": settings.github_project_owner_type,
-            "GITHUB_PROJECT_NUMBER": settings.github_project_number,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise ValueError(f"GitHub App settings are missing: {', '.join(missing)}")
         if settings.github_app_id <= 0:
             raise ValueError("GITHUB_APP_ID must be a positive integer")
-        if settings.github_project_number <= 0:
-            raise ValueError("GITHUB_PROJECT_NUMBER must be a positive integer")
         return cls(
             app_id=settings.github_app_id,
             private_key_path=settings.github_private_key_path,
             api_url=settings.github_api_url,
-            project_owner=settings.github_project_owner,
-            project_owner_type=settings.github_project_owner_type,
-            project_number=settings.github_project_number,
             status_field_name=settings.project_status_field_name,
             ready_option_name=settings.project_ready_option_name,
             done_option_name=settings.project_done_option_name,
@@ -106,9 +86,6 @@ class GitHubAppClient:
         item_node_id: str,
         installation_id: int,
     ) -> Mapping[str, object]:
-        project_id, status_field_id, ready_option_id, _ = self._project_identity(
-            installation_id
-        )
         result = self._graphql(
             """
             query($itemId: ID!) {
@@ -116,7 +93,24 @@ class GitHubAppClient:
                 ... on ProjectV2Item {
                   id
                                     isArchived
-                  project { id }
+                                    project {
+                                        id
+                                        owner {
+                                            __typename
+                                            ... on Organization { login }
+                                            ... on User { login }
+                                        }
+                                        fields(first: 100) {
+                                            nodes {
+                                                ... on ProjectV2SingleSelectField {
+                                                    id
+                                                    name
+                                                    options { id name }
+                                                }
+                                            }
+                                            pageInfo { hasNextPage }
+                                        }
+                                    }
                   content {
                     ... on Issue {
                       number
@@ -150,8 +144,30 @@ class GitHubAppClient:
         content = item.get("content")
         if not isinstance(project, Mapping) or not isinstance(content, Mapping):
             raise TypeError("Project item must contain a project and issue")
-        if project.get("id") != project_id:
-            return {"is_target_project": False}
+        project_id = project.get("id")
+        if not isinstance(project_id, str) or not project_id:
+            raise TypeError("Project item is missing its Project node ID")
+        if item.get("id") != item_node_id:
+            raise ValueError("GitHub returned a different Project item")
+        project_owner = project.get("owner")
+        owner_login = (
+            project_owner.get("login") if isinstance(project_owner, Mapping) else None
+        )
+        owner_type = (
+            project_owner.get("__typename")
+            if isinstance(project_owner, Mapping)
+            else None
+        )
+        owner_types = {"Organization": "organization", "User": "user"}
+        if (
+            not isinstance(owner_login, str)
+            or not owner_login.strip()
+            or owner_type not in owner_types
+        ):
+            raise TypeError("Project owner is unavailable or unsupported")
+        status_field_id, ready_option_id, done_option_id = (
+            self._project_status_configuration(project)
+        )
         repository = content.get("repository")
         field_values = item.get("fieldValues")
         page_info = (
@@ -181,14 +197,28 @@ class GitHubAppClient:
             raise RuntimeError("GitHub Project item has ambiguous status values")
         if not isinstance(repository, Mapping):
             raise TypeError("Project item issue is missing its repository")
+        repository_name = repository.get("nameWithOwner")
+        if not isinstance(repository_name, str) or not repository_name.strip():
+            raise TypeError("Project item issue is missing its repository")
+        repository_info = self.get_repository(repository_name, installation_id)
+        accessible_repository = repository_info.get("full_name")
+        if (
+            not isinstance(accessible_repository, str)
+            or accessible_repository.casefold() != repository_name.casefold()
+        ):
+            raise ValueError(
+                "Project item issue repository is not accessible to this installation"
+            )
         return {
-            "project_node_id": project.get("id"),
+            "project_node_id": project_id,
+            "project_owner": owner_login,
+            "project_owner_type": owner_types[owner_type],
             "status_field_id": status_field_id,
             "status_option_id": status_option_id,
+            "ready_option_id": ready_option_id,
+            "done_option_id": done_option_id,
             "status_field_name": self._status_field_name,
             "status_option_name": status_option_name,
-            "ready_option_id": ready_option_id,
-            "is_target_project": True,
             "is_archived": item.get("isArchived"),
             "done_option_name": self._done_option_name,
             "issue": {
@@ -196,7 +226,7 @@ class GitHubAppClient:
                 "state": content.get("state"),
                 "title": content.get("title"),
                 "body": content.get("body"),
-                "repository": repository.get("nameWithOwner"),
+                "repository": repository_name,
             },
         }
 
@@ -577,15 +607,32 @@ class GitHubAppClient:
     ) -> Mapping[str, object]:
         project_id = state.get("project_node_id")
         item_id = state.get("project_item_id")
-        if not isinstance(project_id, str) or not isinstance(item_id, str):
-            raise TypeError("Task is missing its GitHub Project or item node ID")
-        target_project_id, status_field_id, _, done_option_id = self._project_identity(
-            installation_id
-        )
-        if project_id != target_project_id:
-            raise ValueError(
-                "Task Project does not match the configured GitHub Project"
-            )
+        owner = state.get("project_owner")
+        owner_type = state.get("project_owner_type")
+        repository = state.get("target_repository")
+        if (
+            not isinstance(project_id, str)
+            or not isinstance(item_id, str)
+            or not isinstance(owner, str)
+            or owner_type not in {"organization", "user"}
+            or not isinstance(repository, str)
+        ):
+            raise TypeError("Task is missing its GitHub Project identity")
+        resolved = self.get_project_item(item_id, installation_id)
+        issue = resolved.get("issue")
+        if (
+            resolved.get("project_node_id") != project_id
+            or resolved.get("project_owner") != owner
+            or resolved.get("project_owner_type") != owner_type
+            or not isinstance(issue, Mapping)
+            or not isinstance(issue.get("repository"), str)
+            or issue["repository"].casefold() != repository.casefold()
+        ):
+            raise ValueError("Task Project item no longer matches its saved identity")
+        status_field_id = resolved.get("status_field_id")
+        done_option_id = resolved.get("done_option_id")
+        if not isinstance(status_field_id, str) or not isinstance(done_option_id, str):
+            raise TypeError("Project status field or Done option is unavailable")
         result = self._graphql(
             """
             mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
@@ -691,43 +738,15 @@ class GitHubAppClient:
             config = replace(config, timeout=httpx.Timeout(timeout))
         return GitHub(auth, config=config)
 
-    def _project_identity(self, installation_id: int) -> tuple[str, str, str, str]:
-        owner_field = self._project_owner_type
-        result = self._graphql(
-            f"""
-            query($owner: String!, $number: Int!) {{
-              target: {owner_field}(login: $owner) {{
-                projectV2(number: $number) {{
-                  id
-                  fields(first: 100) {{
-                    nodes {{
-                      ... on ProjectV2SingleSelectField {{
-                        id
-                        name
-                        options {{ id name }}
-                      }}
-                    }}
-                    pageInfo {{ hasNextPage }}
-                  }}
-                }}
-              }}
-            }}
-            """,
-            {"owner": self._project_owner, "number": self._project_number},
-            installation_id=installation_id,
-        )
-        owner = result.get("target")
-        project = owner.get("projectV2") if isinstance(owner, Mapping) else None
-        if not isinstance(project, Mapping):
-            raise TypeError("Configured GitHub Project was not found or is unavailable")
-        project_id = project.get("id")
+    def _project_status_configuration(
+        self,
+        project: Mapping[str, object],
+    ) -> tuple[str, str, str]:
         fields = project.get("fields")
         nodes = fields.get("nodes") if isinstance(fields, Mapping) else None
         page_info = fields.get("pageInfo") if isinstance(fields, Mapping) else None
         if (
-            not isinstance(project_id, str)
-            or not project_id
-            or not isinstance(nodes, list)
+            not isinstance(nodes, list)
             or not isinstance(page_info, Mapping)
             or page_info.get("hasNextPage") is not False
         ):
@@ -739,9 +758,7 @@ class GitHubAppClient:
             and field.get("name") == self._status_field_name
         ]
         if len(matches) != 1:
-            raise RuntimeError(
-                "Configured GitHub Project status field is missing or ambiguous"
-            )
+            raise RuntimeError("GitHub Project status field is missing or ambiguous")
         field_id = matches[0].get("id")
         options = matches[0].get("options")
         if (
@@ -752,22 +769,21 @@ class GitHubAppClient:
             raise RuntimeError("GitHub Project status field is incomplete")
 
         def option_id(name: str) -> str:
-            matches = [
+            matching_options = [
                 option
                 for option in options
                 if isinstance(option, Mapping) and option.get("name") == name
             ]
-            if len(matches) != 1:
+            if len(matching_options) != 1:
                 raise RuntimeError(
-                    f"Configured GitHub Project option {name!r} is missing or ambiguous"
+                    f"GitHub Project option {name!r} is missing or ambiguous"
                 )
-            option_id_value = matches[0].get("id")
-            if not isinstance(option_id_value, str) or not option_id_value:
+            result = matching_options[0].get("id")
+            if not isinstance(result, str) or not result:
                 raise RuntimeError("GitHub Project status option is incomplete")
-            return option_id_value
+            return result
 
         return (
-            project_id,
             field_id,
             option_id(self._ready_option_name),
             option_id(self._done_option_name),

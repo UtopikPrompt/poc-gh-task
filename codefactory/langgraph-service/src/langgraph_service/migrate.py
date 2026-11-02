@@ -17,6 +17,7 @@ MIGRATION_FILES = (
     "001_checkpoint_schema.sql",
     "002_service_roles.sql",
     "003_github_task_installation.sql",
+    "004_github_project_identity.sql",
 )
 
 
@@ -64,7 +65,7 @@ def _ensure_login_role(
 
 
 def _apply_sql_file(connection: psycopg.Connection, path: Path) -> None:
-    with connection.cursor(cursor_factory=ClientCursor) as cursor:
+    with ClientCursor(connection) as cursor:
         cursor.execute(path.read_text(encoding="utf-8"))
 
 

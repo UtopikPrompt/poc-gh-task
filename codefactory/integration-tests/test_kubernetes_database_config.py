@@ -120,10 +120,15 @@ def test_postgres_and_migration_job_are_bundled_in_every_environment():
 
         pod_spec = postgres["spec"]["template"]["spec"]
         assert postgres["spec"]["replicas"] == 1
-        assert postgres["spec"]["volumeClaimTemplates"][0]["spec"] == {
+        expected_claim_spec = {
             "accessModes": ["ReadWriteOnce"],
             "resources": {"requests": {"storage": "10Gi"}},
         }
+        if environment == "dev":
+            expected_claim_spec["storageClassName"] = "codefactory-ssd"
+        assert (
+            postgres["spec"]["volumeClaimTemplates"][0]["spec"] == expected_claim_spec
+        )
         assert (
             service["spec"]["selector"] == postgres["spec"]["selector"]["matchLabels"]
         )
@@ -197,13 +202,14 @@ def test_postgres_and_migration_job_are_bundled_in_every_environment():
             and resource.get("metadata", {}).get("name")
             == "codefactory-github-settings"
         )
-        assert "GITHUB_PROJECT_NODE_ID" not in settings["data"]
-        assert settings["data"] == {
-            "GITHUB_APP_ID": "",
-            "GITHUB_PROJECT_OWNER": "",
-            "GITHUB_PROJECT_OWNER_TYPE": "",
-            "GITHUB_PROJECT_NUMBER": "",
-        }
+        required_settings = {"GITHUB_APP_ID"}
+        settings_data = settings["data"]
+        assert isinstance(settings_data, dict)
+        assert required_settings <= settings_data.keys()
+        assert all(
+            isinstance(settings_data[key], str) and settings_data[key].strip()
+            for key in required_settings
+        )
         github_deployment = next(
             resource
             for resource in resources
@@ -222,17 +228,102 @@ def test_postgres_and_migration_job_are_bundled_in_every_environment():
         }
         assert github_config_refs == {
             "GITHUB_APP_ID": "GITHUB_APP_ID",
-            "GITHUB_PROJECT_OWNER": "GITHUB_PROJECT_OWNER",
-            "GITHUB_PROJECT_OWNER_TYPE": "GITHUB_PROJECT_OWNER_TYPE",
-            "GITHUB_PROJECT_NUMBER": "GITHUB_PROJECT_NUMBER",
         }
         assert not {
             "GITHUB_INSTALLATION_ID",
+            "GITHUB_PROJECT_OWNER",
+            "GITHUB_PROJECT_OWNER_TYPE",
+            "GITHUB_PROJECT_NUMBER",
             "GITHUB_PROJECT_NODE_ID",
             "GITHUB_PROJECT_STATUS_FIELD_ID",
             "GITHUB_PROJECT_READY_OPTION_ID",
             "GITHUB_PROJECT_DONE_OPTION_ID",
         } & set(github_config_refs)
+
+
+def test_dev_postgres_uses_retained_node_local_ssd_storage():
+    dev_resources = _render_environment("dev")
+    storage_class = next(
+        resource
+        for resource in dev_resources
+        if resource.get("kind") == "StorageClass"
+        and resource.get("metadata", {}).get("name") == "codefactory-ssd"
+    )
+    volume = next(
+        resource
+        for resource in dev_resources
+        if resource.get("kind") == "PersistentVolume"
+        and resource.get("metadata", {}).get("name") == "codefactory-postgres-data"
+    )
+
+    assert storage_class["provisioner"] == "kubernetes.io/no-provisioner"
+    assert storage_class["reclaimPolicy"] == "Retain"
+    assert storage_class["volumeBindingMode"] == "WaitForFirstConsumer"
+    assert storage_class["metadata"] == {"name": "codefactory-ssd"}
+    assert volume["spec"] == {
+        "capacity": {"storage": "10Gi"},
+        "volumeMode": "Filesystem",
+        "accessModes": ["ReadWriteOnce"],
+        "persistentVolumeReclaimPolicy": "Retain",
+        "storageClassName": "codefactory-ssd",
+        "local": {"path": "/mnt/k8s-data-ssd/codefactory/postgres"},
+        "nodeAffinity": {
+            "required": {
+                "nodeSelectorTerms": [
+                    {
+                        "matchExpressions": [
+                            {
+                                "key": "kubernetes.io/hostname",
+                                "operator": "In",
+                                "values": ["k8s-node01"],
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "claimRef": {
+            "namespace": "codefactory",
+            "name": "postgres-data-codefactory-postgres-0",
+        },
+    }
+
+    for environment in ("staging", "prod"):
+        resources = _render_environment(environment)
+        assert not any(resource.get("kind") == "StorageClass" for resource in resources)
+        assert not any(
+            resource.get("kind") == "PersistentVolume" for resource in resources
+        )
+
+
+def test_dev_deploy_preflight_validates_storage_and_guards_claim_recovery():
+    deploy_script = (KUBERNETES_ROOT / "environments/dev/deploy.sh").read_text()
+
+    for required_check in (
+        'select(.kind == "StorageClass" and .metadata.name == "codefactory-ssd")',
+        'select(.kind == "PersistentVolume" and .metadata.name == "codefactory-postgres-data")',
+        "contract == ($expected | contract)",
+        "specKeys: (.spec | keys)",
+        "retained data will not be adopted or changed.",
+        '.status.phase == "Pending"',
+        '(.spec.volumeName // "") == ""',
+        "preconditions:({uid:$uid,resourceVersion:$resource_version})",
+        "resourceVersion:$resource_version",
+        'if [[ "$recreate_pvc" == true ]]',
+        'if [[ "$get_status" == 404 ]]',
+    ):
+        assert required_check in deploy_script
+
+
+def test_dev_deploy_does_not_require_fixed_project_settings():
+    deploy_script = (KUBERNETES_ROOT / "environments/dev/deploy.sh").read_text()
+
+    for setting in (
+        "GITHUB_PROJECT_OWNER",
+        "GITHUB_PROJECT_OWNER_TYPE",
+        "GITHUB_PROJECT_NUMBER",
+    ):
+        assert setting not in deploy_script
 
 
 def test_installation_migration_is_additive_and_registered():
@@ -248,3 +339,13 @@ def test_installation_migration_is_additive_and_registered():
     assert "ADD COLUMN IF NOT EXISTS installation_id BIGINT" in migration
     assert "UPDATE github_service.task_contexts" not in migration
     assert '"003_github_task_installation.sql"' in migration_runner
+
+    project_identity_migration = (
+        REPOSITORY_ROOT
+        / "codefactory/github-service/migrations/004_github_project_identity.sql"
+    ).read_text()
+    assert "ADD COLUMN IF NOT EXISTS project_owner TEXT" in project_identity_migration
+    assert (
+        "ADD COLUMN IF NOT EXISTS project_owner_type TEXT" in project_identity_migration
+    )
+    assert '"004_github_project_identity.sql"' in migration_runner

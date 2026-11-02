@@ -1,12 +1,123 @@
 import json
+import logging
 
 import httpx
 import pytest
+import langgraph_service.github_client as github_client
 from langgraph_service.github_client import (
     GitHubServiceClient,
     build_submit_proposal_operation,
 )
 from langgraph_service.worker import LangGraphEventWorker
+
+
+def test_claim_event_retries_connect_timeout_and_recovers(caplog, monkeypatch):
+    requests = []
+    delays = []
+    event = {"event_id": "event-1", "claim_token": "claim-1"}
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) < 3:
+            raise httpx.ConnectTimeout("connect timed out", request=request)
+        return httpx.Response(200, json={"event": event})
+
+    monkeypatch.setattr(github_client.time, "sleep", delays.append)
+    caplog.set_level(logging.WARNING, logger="langgraph_service.github_client")
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.claim_event() == event
+    finally:
+        client.close()
+
+    assert len(requests) == 3
+    assert [request.url.path for request in requests] == [
+        "/internal/events/claim",
+        "/internal/events/claim",
+        "/internal/events/claim",
+    ]
+    assert delays == [0.25, 0.5]
+    assert caplog.text.count("retrying attempt") == 2
+
+
+def test_claim_event_stops_after_bounded_connect_timeout_attempts(caplog, monkeypatch):
+    requests = []
+    delays = []
+
+    def handler(request):
+        requests.append(request)
+        raise httpx.ConnectTimeout("connect timed out", request=request)
+
+    monkeypatch.setattr(github_client.time, "sleep", delays.append)
+    caplog.set_level(logging.WARNING, logger="langgraph_service.github_client")
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(httpx.ConnectTimeout, match="connect timed out"):
+            client.claim_event()
+    finally:
+        client.close()
+
+    assert len(requests) == github_client.CLAIM_MAX_ATTEMPTS
+    assert delays == [0.25, 0.5]
+    assert "failed after 3 connection attempts" in caplog.text
+
+
+def test_claim_event_does_not_retry_read_timeout_after_possible_server_commit(
+    monkeypatch,
+):
+    server_claims = []
+    delays = []
+
+    def handler(request):
+        server_claims.append(request)
+        raise httpx.ReadTimeout("response timed out", request=request)
+
+    monkeypatch.setattr(github_client.time, "sleep", delays.append)
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(httpx.ReadTimeout, match="response timed out"):
+            client.claim_event()
+    finally:
+        client.close()
+
+    assert len(server_claims) == 1
+    assert delays == []
+
+
+def test_claim_event_does_not_retry_non_success_http_response(monkeypatch):
+    requests = []
+    delays = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503, json={"detail": "unavailable"})
+
+    monkeypatch.setattr(github_client.time, "sleep", delays.append)
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            client.claim_event()
+    finally:
+        client.close()
+
+    assert len(requests) == 1
+    assert delays == []
 
 
 class FakeQueue:

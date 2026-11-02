@@ -98,26 +98,29 @@ spec:
             secretKeyRef:
               name: codefactory-runtime-secrets
               key: INTERNAL_SERVICE_TOKEN
+        - name: GITHUB_OAUTH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: github-dashboard-oauth
+              key: GITHUB_OAUTH_CLIENT_ID
+              optional: true
+        - name: GITHUB_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: github-dashboard-oauth
+              key: GITHUB_OAUTH_CLIENT_SECRET
+              optional: true
+        - name: DASHBOARD_SESSION_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: github-dashboard-oauth
+              key: DASHBOARD_SESSION_SIGNING_KEY
+              optional: true
         - name: GITHUB_APP_ID
           valueFrom:
             configMapKeyRef:
               name: codefactory-github-settings
               key: GITHUB_APP_ID
-        - name: GITHUB_PROJECT_OWNER
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_OWNER
-        - name: GITHUB_PROJECT_OWNER_TYPE
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_OWNER_TYPE
-        - name: GITHUB_PROJECT_NUMBER
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_NUMBER
         - name: GITHUB_PRIVATE_KEY_PATH
           value: /var/run/secrets/github-app/private-key.pem
         volumeMounts:

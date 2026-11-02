@@ -5,8 +5,12 @@ resources:
 - ../../bases/platform
 - ../../bases/github-service
 - ../../bases/langgraph-service
+- github-webhook-ingress.yaml
+- storage.yaml
 patches:
 - path: database-config.yaml
+- path: postgres-storage.yaml
+- path: local-image-pull-policy.yaml
 images:
 - name: codefactory/github-service
   newName: ghcr.io/utopikprompt/poc-gh-task-github-service

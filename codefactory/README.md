@@ -27,3 +27,21 @@ output. GitHub Service independently validates source paths and proposals.
 Run the services, tests, and Kubernetes overlays from the repository root using
 the commands in the root README and Makefile. Cross-service tests live in
 `integration-tests/`; service-specific tests stay with their owning service.
+
+## Workflow state dashboard
+
+The GitHub Service serves a read-only workflow dashboard at `/` and its safe
+summary API at `/api/workflows`. Both are reachable through the existing
+`github-service` ClusterIP; no public route is added. To view it locally in the
+`codefactory` namespace, run:
+
+```sh
+kubectl -n codefactory port-forward service/github-service 8000:8000
+```
+
+Then open <http://127.0.0.1:8000/>. The summary includes task, repository,
+pull-request, latest event, queue status, and timestamps. Issue numbers are
+shown as unavailable because the current schema only stores them in private
+event payloads, which the dashboard does not query. Failure details are
+withheld; only failure presence and status are shown. If the summary store is
+unavailable, the page displays an unavailable state.

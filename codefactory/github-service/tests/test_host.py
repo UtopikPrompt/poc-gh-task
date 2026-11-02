@@ -61,9 +61,6 @@ def test_github_host_does_not_load_langgraph_operations(monkeypatch):
     _set_github_database_settings(monkeypatch)
     monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "configured-token")
     monkeypatch.setenv("GITHUB_APP_ID", "321")
-    monkeypatch.setenv("GITHUB_PROJECT_OWNER", "example-org")
-    monkeypatch.setenv("GITHUB_PROJECT_OWNER_TYPE", "organization")
-    monkeypatch.setenv("GITHUB_PROJECT_NUMBER", "7")
     monkeypatch.delenv("WORKFLOW_OPERATIONS_MODULE", raising=False)
     received = []
     monkeypatch.setattr(

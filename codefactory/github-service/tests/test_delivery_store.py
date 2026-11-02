@@ -8,11 +8,24 @@ from github_service.delivery_store import (
 )
 
 
+def _ready_event(task_id):
+    return {
+        "task_id": task_id,
+        "event_type": "ready",
+        "project_owner": "example-org",
+        "project_owner_type": "organization",
+        "project_node_id": "PVT_project",
+        "project_item_id": "PVTI_item",
+        "target_repositories": ["example/project"],
+        "installation_id": 654,
+    }
+
+
 def test_sqlite_queue_is_idempotent_and_requires_current_claim_token(tmp_path):
     store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
     try:
         assert store.claim_delivery("delivery-1") == "claimed"
-        event = {"task_id": "task-1", "event_type": "ready"}
+        event = _ready_event("task-1")
         first = store.enqueue_events("delivery-1", [event])
         assert store.enqueue_events("delivery-1", [event]) == first
         store.complete_delivery("delivery-1", {"status": "queued"})
@@ -92,7 +105,7 @@ def test_queue_serializes_events_for_the_same_task(tmp_path):
         store.enqueue_events(
             "delivery-ordered",
             [
-                {"task_id": "task-ordered", "event_type": "ready"},
+                _ready_event("task-ordered"),
                 {"task_id": "task-ordered", "event_type": "ci"},
             ],
         )
@@ -113,22 +126,26 @@ def test_queue_serializes_events_for_the_same_task(tmp_path):
 
 def test_task_installation_context_is_persisted_and_cannot_be_switched(tmp_path):
     store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
-    ready_event = {
-        "task_id": "task-installation",
-        "event_type": "ready",
-        "project_node_id": "PVT_project",
-        "project_item_id": "PVTI_item",
-        "target_repositories": ["example/project"],
-        "installation_id": 654,
-    }
+    ready_event = _ready_event("task-installation")
     try:
         store.enqueue_events("delivery-first", [ready_event])
         assert store.task_context("task-installation") == {
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
             "project_node_id": "PVT_project",
             "project_item_id": "PVTI_item",
             "target_repository": "example/project",
             "installation_id": "654",
         }
+
+        assert store.enqueue_events("delivery-repeat", [ready_event]) == []
+        assert (
+            store._connection.execute(
+                "SELECT COUNT(*) FROM task_event_inbox WHERE task_id = ?",
+                ("task-installation",),
+            ).fetchone()[0]
+            == 1
+        )
 
         conflicting_event = {**ready_event, "installation_id": 987}
         with pytest.raises(ValueError, match="immutable task context"):
@@ -138,7 +155,7 @@ def test_task_installation_context_is_persisted_and_cannot_be_switched(tmp_path)
         store.close()
 
 
-def test_legacy_task_context_without_installation_is_not_reused(tmp_path):
+def test_legacy_task_context_schema_is_rejected_without_modification(tmp_path):
     database_path = tmp_path / "github.sqlite"
     connection = sqlite3.connect(database_path)
     connection.execute(
@@ -153,13 +170,35 @@ def test_legacy_task_context_without_installation_is_not_reused(tmp_path):
     connection.commit()
     connection.close()
 
-    store = SQLiteDeliveryStore(database_path)
-    try:
-        assert store.task_context("legacy-task") is None
-        assert "installation_id" in {
-            row["name"]
-            for row in store._connection.execute("PRAGMA table_info(task_contexts)")
+    with pytest.raises(RuntimeError, match="schema is missing required columns"):
+        SQLiteDeliveryStore(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT task_id, project_node_id, project_item_id, target_repository "
+            "FROM task_contexts WHERE task_id = ?",
+            ("legacy-task",),
+        ).fetchone()
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(task_contexts)")
         }
+    assert row == ("legacy-task", "PVT_project", "PVTI_item", "example/project")
+    assert "project_owner" not in columns
+
+
+def test_incomplete_stored_task_context_fails_clearly(tmp_path):
+    store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
+    try:
+        store._connection.execute(
+            "INSERT INTO task_contexts "
+            "(task_id, project_node_id, project_item_id, target_repository) "
+            "VALUES (?, ?, ?, ?)",
+            ("incomplete-task", "PVT_project", "PVTI_item", "example/project"),
+        )
+        with pytest.raises(
+            ValueError, match="stored task context.*incomplete or invalid"
+        ):
+            store.task_context("incomplete-task")
     finally:
         store.close()
 
@@ -283,15 +322,17 @@ def test_postgres_task_context_never_changes_installation(stored_installation_id
 
         def execute(self, statement, params=()):
             statements.append((statement, params))
-            if "INSERT INTO github_service.task_event_inbox" in statement:
-                self.result = {"event_id": "event-1"}
-            elif "SELECT project_node_id, project_item_id" in statement:
+            if "SELECT project_owner, project_owner_type" in statement:
                 self.result = {
+                    "project_owner": "example-org",
+                    "project_owner_type": "organization",
                     "project_node_id": "PVT_project",
                     "project_item_id": "PVTI_item",
                     "target_repository": "example/project",
                     "installation_id": stored_installation_id,
                 }
+            elif "SELECT event_id FROM github_service.task_event_inbox" in statement:
+                self.result = None
             else:
                 self.result = None
 
@@ -315,27 +356,18 @@ def test_postgres_task_context_never_changes_installation(stored_installation_id
         "postgresql://test",
         connection_factory=Connection,
     )
-    event = {
-        "task_id": "task-1",
-        "event_type": "ready",
-        "project_node_id": "PVT_project",
-        "project_item_id": "PVTI_item",
-        "target_repositories": ["example/project"],
-        "installation_id": 654,
-    }
+    event = _ready_event("task-1")
 
     if stored_installation_id == 654:
-        assert store.enqueue_events("delivery-1", [event]) == ["event-1"]
+        assert store.enqueue_events("delivery-1", [event]) == []
         assert connection_state == {"committed": True, "rolled_back": False}
     else:
         with pytest.raises(ValueError, match="immutable task context"):
             store.enqueue_events("delivery-1", [event])
         assert connection_state == {"committed": False, "rolled_back": True}
 
-    context_insert = next(
-        statement
+    assert any("pg_advisory_xact_lock" in statement for statement, _ in statements)
+    assert not any(
+        "INSERT INTO github_service.task_event_inbox" in statement
         for statement, _ in statements
-        if "INSERT INTO github_service.task_contexts" in statement
     )
-    assert "ON CONFLICT(task_id) DO NOTHING" in context_insert
-    assert "DO UPDATE" not in context_insert

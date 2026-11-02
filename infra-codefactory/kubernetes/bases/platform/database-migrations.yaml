@@ -30,7 +30,7 @@ spec:
         imagePullPolicy: Always
         command: [ "sh", "-ec" ]
         args:
-        - cp /app/migrations/001_github_event_queue.sql /migrations/001_github_event_queue.sql && cp /app/migrations/002_service_roles.sql /migrations/002_service_roles.sql && cp /app/migrations/003_github_task_installation.sql /migrations/003_github_task_installation.sql
+        - cp /app/migrations/001_github_event_queue.sql /migrations/001_github_event_queue.sql && cp /app/migrations/002_service_roles.sql /migrations/002_service_roles.sql && cp /app/migrations/003_github_task_installation.sql /migrations/003_github_task_installation.sql && cp /app/migrations/004_github_project_identity.sql /migrations/004_github_project_identity.sql
         volumeMounts:
         - name: migrations
           mountPath: /migrations

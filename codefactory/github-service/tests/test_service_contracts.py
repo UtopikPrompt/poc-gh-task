@@ -1,9 +1,11 @@
 import hashlib
 import hmac
 import json
+import logging
 
 from fastapi.testclient import TestClient
 from github_service.bootstrap import create_app
+from github_service.events import GitHubEventNormalizer, GitHubWebhook, ProjectEventConfig
 from github_service.settings import RuntimeSettings
 
 
@@ -12,7 +14,8 @@ def _signature(body, secret):
     return f"sha256={digest}"
 
 
-def test_internal_api_requires_bearer_auth_and_claims_durable_events(tmp_path):
+def test_internal_api_requires_bearer_auth_and_claims_durable_events(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
     settings = RuntimeSettings(
         github_webhook_secret="webhook-secret",
         database_path=tmp_path / "github.sqlite",
@@ -22,6 +25,10 @@ def test_internal_api_requires_bearer_auth_and_claims_durable_events(tmp_path):
         normalize_event=lambda *_: {
             "task_id": "task-1",
             "event_type": "ready",
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
+            "project_node_id": "PVT_project",
+            "project_item_id": "PVTI_item",
             "target_repositories": ["example/project"],
             "installation_id": 654,
         },
@@ -31,7 +38,15 @@ def test_internal_api_requires_bearer_auth_and_claims_durable_events(tmp_path):
         unauthorized = client.post("/internal/events/claim")
         assert unauthorized.status_code == 401
 
-        body = json.dumps({"action": "edited", "installation": {"id": 654}}).encode()
+        body = json.dumps(
+            {
+                "action": "edited",
+                "installation": {"id": 654},
+                "title": "payload-title-marker",
+                "body": "payload-body-marker",
+                "token": "payload-token-marker",
+            }
+        ).encode()
         accepted = client.post(
             "/webhooks/github",
             content=body,
@@ -43,6 +58,18 @@ def test_internal_api_requires_bearer_auth_and_claims_durable_events(tmp_path):
         )
         assert accepted.status_code == 200
         assert accepted.json()["status"] == "queued"
+        decision = next(
+            record
+            for record in caplog.records
+            if record.getMessage() == "GitHub webhook decision"
+        )
+        assert decision.github_event == "projects_v2_item"
+        assert decision.github_action == "edited"
+        assert decision.reason == "accepted"
+        assert "webhook-secret" not in caplog.text
+        assert "payload-title-marker" not in caplog.text
+        assert "payload-body-marker" not in caplog.text
+        assert "payload-token-marker" not in caplog.text
 
         headers = {"authorization": "Bearer service-token"}
         claim_response = client.post("/internal/events/claim", headers=headers)
@@ -231,3 +258,43 @@ def test_normalized_event_cannot_substitute_webhook_installation(tmp_path):
 
     assert response.status_code == 400
     assert "does not match webhook" in response.json()["detail"]
+
+
+def test_normalizer_logs_status_rejection_without_payload_content(caplog):
+    class FakeAPI:
+        def get_project_item(self, _item_node_id, _installation_id):
+            return {
+                "status_field_name": "Status",
+                "status_option_name": "In Progress",
+            }
+
+    class FakeStore:
+        def task_context(self, _task_id):
+            return None
+
+    webhook = GitHubWebhook(
+        event_name="projects_v2_item",
+        delivery_id="delivery-ignored",
+        installation_id=654,
+        payload={
+            "action": "edited",
+            "installation": {"id": 654},
+            "projects_v2_item": {"node_id": "PVTI_private-item"},
+            "body": "payload-body-marker",
+        },
+    )
+    caplog.set_level(logging.INFO)
+
+    result = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())(webhook, FakeStore())
+
+    assert result is None
+    decision = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "GitHub webhook decision"
+    )
+    assert decision.github_event == "projects_v2_item"
+    assert decision.github_action == "edited"
+    assert decision.reason == "status_mismatch"
+    assert "payload-body-marker" not in caplog.text
+    assert "PVTI_private-item" not in caplog.text

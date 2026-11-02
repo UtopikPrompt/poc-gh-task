@@ -14,7 +14,7 @@ from github_service.events import (
 from github_service.github_app import GitHubAppClient
 
 
-def _client(tmp_path, transport, project_owner_type="organization"):
+def _client(tmp_path, transport):
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = private_key.private_bytes(
         serialization.Encoding.PEM,
@@ -30,9 +30,6 @@ def _client(tmp_path, transport, project_owner_type="organization"):
     client = GitHubAppClient(
         app_id=321,
         private_key_path=key_path,
-        project_owner="example-org",
-        project_owner_type=project_owner_type,
-        project_number=7,
         transport=transport,
     )
     return client, public_key
@@ -61,16 +58,20 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
         assert request.headers["Authorization"] == "token installation-token"
         if request.url.path == "/graphql":
             body = json.loads(request.content)
-            if "query($owner:" in body["query"]:
-                assert "organization(login: $owner)" in body["query"]
-                assert body["variables"] == {"owner": "example-org", "number": 7}
+            if "query($itemId" in body["query"]:
                 return httpx.Response(
                     200,
                     json={
                         "data": {
-                            "target": {
-                                "projectV2": {
+                            "node": {
+                                "id": "PVTI_item",
+                                "isArchived": False,
+                                "project": {
                                     "id": "PVT_project",
+                                    "owner": {
+                                        "__typename": "Organization",
+                                        "login": "example-org",
+                                    },
                                     "fields": {
                                         "nodes": [
                                             {
@@ -90,20 +91,7 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
                                         ],
                                         "pageInfo": {"hasNextPage": False},
                                     },
-                                }
-                            }
-                        }
-                    },
-                )
-            if "query($itemId" in body["query"]:
-                return httpx.Response(
-                    200,
-                    json={
-                        "data": {
-                            "node": {
-                                "id": "PVTI_item",
-                                "isArchived": False,
-                                "project": {"id": "PVT_project"},
+                                },
                                 "content": {
                                     "number": 42,
                                     "state": "OPEN",
@@ -135,11 +123,13 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
                     "data": {
                         "updateProjectV2ItemFieldValue": {
                             "projectV2Item": {"id": "PVTI_item"}
-                        }
+                        },
                     }
                 },
             )
 
+        if request.url.path == "/repos/org/repo":
+            return httpx.Response(200, json={"full_name": "org/repo"})
         if request.url.path.endswith("/pulls/17"):
             return httpx.Response(
                 200,
@@ -224,9 +214,10 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
     try:
         item = client.get_project_item("PVTI_item", 654)
         assert item["project_node_id"] == "PVT_project"
+        assert item["project_owner"] == "example-org"
+        assert item["project_owner_type"] == "organization"
         assert item["status_option_id"] == "option-ready"
         assert item["status_option_name"] == "Ready"
-        assert item["is_target_project"] is True
         assert item["is_archived"] is False
         assert item["done_option_name"] == "Done"
         assert item["issue"]["state"] == "OPEN"
@@ -251,6 +242,9 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
         task_state = {
             "project_node_id": "PVT_project",
             "project_item_id": "PVTI_item",
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
+            "target_repository": "org/repo",
         }
         update = client.mark_task_done(task_state, 654)
         assert "updateProjectV2ItemFieldValue" in update
@@ -349,9 +343,10 @@ def test_project_node_id_is_derived_from_resolved_webhook_item():
             assert installation_id == 654
             return {
                 "project_node_id": "PVT_from_webhook",
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
                 "status_field_name": "Status",
                 "status_option_name": "Ready",
-                "is_target_project": True,
                 "issue": {"repository": "org/repo"},
             }
 
@@ -374,6 +369,8 @@ def test_project_node_id_is_derived_from_resolved_webhook_item():
     )
 
     assert event["project_node_id"] == "PVT_from_webhook"
+    assert event["project_owner"] == "example-org"
+    assert event["project_owner_type"] == "organization"
     assert event["installation_id"] == 654
 
 
@@ -384,7 +381,14 @@ def test_project_event_cannot_switch_an_existing_tasks_installation():
 
     class FakeStore:
         def task_context(self, _task_id):
-            return {"installation_id": "654"}
+            return {
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
+                "project_node_id": "PVT_any_project",
+                "project_item_id": "PVTI_item",
+                "target_repository": "org/repo",
+                "installation_id": "654",
+            }
 
     normalizer = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())
     event = normalizer(
@@ -400,6 +404,68 @@ def test_project_event_cannot_switch_an_existing_tasks_installation():
         store=FakeStore(),
     )
 
+    assert event is None
+
+
+def test_project_event_ignores_non_ready_status():
+    class FakeAPI:
+        def get_project_item(self, *_args):
+            return {
+                "project_node_id": "PVT_any_project",
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
+                "status_field_name": "Status",
+                "status_option_name": "In Progress",
+                "issue": {"repository": "org/repo"},
+            }
+
+    class FakeStore:
+        def task_context(self, _task_id):
+            return None
+
+    event = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())(
+        GitHubWebhook(
+            event_name="projects_v2_item",
+            delivery_id="delivery-not-ready",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "projects_v2_item": {"node_id": "PVTI_item"},
+            },
+        ),
+        store=FakeStore(),
+    )
+    assert event is None
+
+
+def test_repeated_ready_edit_does_not_resolve_or_enqueue_again():
+    class FakeAPI:
+        def get_project_item(self, *_args):
+            raise AssertionError("known Ready task must not be resolved again")
+
+    class FakeStore:
+        def task_context(self, _task_id):
+            return {
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
+                "project_node_id": "PVT_any_project",
+                "project_item_id": "PVTI_item",
+                "target_repository": "org/repo",
+                "installation_id": "654",
+            }
+
+    event = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())(
+        GitHubWebhook(
+            event_name="projects_v2_item",
+            delivery_id="delivery-repeat",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "projects_v2_item": {"node_id": "PVTI_item"},
+            },
+        ),
+        store=FakeStore(),
+    )
     assert event is None
 
 
@@ -464,77 +530,36 @@ def test_project_event_cannot_switch_an_existing_tasks_installation():
         ),
     ],
 )
-def test_project_identity_rejects_missing_or_ambiguous_names(
+def test_project_item_rejects_missing_or_ambiguous_status_configuration(
     tmp_path,
     fields,
     message,
 ):
-    def handle(request):
-        if request.url.path.endswith("/access_tokens"):
-            return httpx.Response(
-                201,
-                json={
-                    "token": "installation-token",
-                    "expires_at": "2099-01-01T00:00:00Z",
-                },
-            )
-        assert request.url.path == "/graphql"
-        return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "target": {
-                        "projectV2": {
-                            "id": "PVT_project",
-                            "fields": {
-                                "nodes": fields,
-                                "pageInfo": {"hasNextPage": False},
-                            },
-                        }
-                    }
-                }
-            },
-        )
-
-    client, _ = _client(tmp_path, httpx.MockTransport(handle))
+    client, _ = _client(
+        tmp_path,
+        httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
     try:
         with pytest.raises(RuntimeError, match=message):
-            client._project_identity(654)
+            client._project_status_configuration(
+                {"fields": {"nodes": fields, "pageInfo": {"hasNextPage": False}}}
+            )
     finally:
         client.close()
 
 
-def test_project_identity_fails_closed_when_fields_are_truncated(tmp_path):
-    def handle(_request):
-        if _request.url.path.endswith("/access_tokens"):
-            return httpx.Response(
-                201,
-                json={
-                    "token": "installation-token",
-                    "expires_at": "2099-01-01T00:00:00Z",
-                },
-            )
-        return httpx.Response(
-            200,
-            json={
-                "data": {
-                    "target": {
-                        "projectV2": {
-                            "id": "PVT_project",
-                            "fields": {
-                                "nodes": [],
-                                "pageInfo": {"hasNextPage": True},
-                            },
-                        }
-                    }
-                }
-            },
-        )
-
-    client, _ = _client(tmp_path, httpx.MockTransport(handle))
+def test_project_status_configuration_fails_closed_when_fields_are_truncated(
+    tmp_path,
+):
+    client, _ = _client(
+        tmp_path,
+        httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
     try:
         with pytest.raises(RuntimeError, match="fields are incomplete"):
-            client._project_identity(654)
+            client._project_status_configuration(
+                {"fields": {"nodes": [], "pageInfo": {"hasNextPage": True}}}
+            )
     finally:
         client.close()
 
@@ -630,7 +655,11 @@ def test_http_errors_preserve_404_handling_and_disable_retries(tmp_path):
     }
 
 
-def test_project_identity_uses_configured_user_owner_kind(tmp_path):
+@pytest.mark.parametrize(
+    ("owner_type", "owner_login"),
+    [("Organization", "example-org"), ("User", "example-user")],
+)
+def test_project_item_resolves_supported_owner_types(tmp_path, owner_type, owner_login):
     def handle(request):
         if request.url.path.endswith("/access_tokens"):
             return httpx.Response(
@@ -640,16 +669,40 @@ def test_project_identity_uses_configured_user_owner_kind(tmp_path):
                     "expires_at": "2099-01-01T00:00:00Z",
                 },
             )
-        body = json.loads(request.content)
-        assert "user(login: $owner)" in body["query"]
-        assert body["variables"] == {"owner": "example-org", "number": 7}
+        if request.url.path.startswith("/repos/"):
+            return httpx.Response(200, json={"full_name": "example/project"})
         return httpx.Response(
             200,
             json={
                 "data": {
-                    "target": {
-                        "projectV2": {
+                    "node": {
+                        "id": "PVTI_item",
+                        "content": {
+                            "number": 42,
+                            "state": "OPEN",
+                            "title": "Task",
+                            "body": "Details",
+                            "repository": {"nameWithOwner": "example/project"},
+                        },
+                        "fieldValues": {
+                            "nodes": [
+                                {
+                                    "name": "Ready",
+                                    "optionId": "ready",
+                                    "field": {
+                                        "id": "status-field",
+                                        "name": "Status",
+                                    },
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False},
+                        },
+                        "project": {
                             "id": "PVT_project",
+                            "owner": {
+                                "__typename": owner_type,
+                                "login": owner_login,
+                            },
                             "fields": {
                                 "nodes": [
                                     {
@@ -663,26 +716,71 @@ def test_project_identity_uses_configured_user_owner_kind(tmp_path):
                                 ],
                                 "pageInfo": {"hasNextPage": False},
                             },
-                        }
+                        },
                     }
                 }
             },
         )
 
-    client, _ = _client(
-        tmp_path,
-        httpx.MockTransport(handle),
-        project_owner_type="user",
-    )
+    client, _ = _client(tmp_path, httpx.MockTransport(handle))
     try:
-        assert client._project_identity(654) == (
-            "PVT_project",
-            "status-field",
-            "ready",
-            "done",
-        )
+        item = client.get_project_item("PVTI_item", 654)
+        assert item["project_owner"] == owner_login
+        assert item["project_owner_type"] == owner_type.lower()
     finally:
         client.close()
+
+
+def test_project_item_rejects_repository_unavailable_to_event_installation(tmp_path):
+    client, _ = _client(
+        tmp_path,
+        httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
+    client._graphql = lambda *_args, **_kwargs: {
+        "node": {
+            "id": "PVTI_item",
+            "isArchived": False,
+            "project": {
+                "id": "PVT_project",
+                "owner": {"__typename": "User", "login": "example-user"},
+                "fields": {
+                    "nodes": [
+                        {
+                            "id": "status-field",
+                            "name": "Status",
+                            "options": [
+                                {"id": "ready", "name": "Ready"},
+                                {"id": "done", "name": "Done"},
+                            ],
+                        }
+                    ],
+                    "pageInfo": {"hasNextPage": False},
+                },
+            },
+            "content": {
+                "number": 42,
+                "state": "OPEN",
+                "repository": {"nameWithOwner": "example/project"},
+            },
+            "fieldValues": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False},
+            },
+        }
+    }
+    requested = []
+
+    def unavailable_repository(repository, installation_id):
+        requested.append((repository, installation_id))
+        return {"full_name": "another/repository"}
+
+    client.get_repository = unavailable_repository
+    try:
+        with pytest.raises(ValueError, match="not accessible to this installation"):
+            client.get_project_item("PVTI_item", 987)
+    finally:
+        client.close()
+    assert requested == [("example/project", 987)]
 
 
 def test_git_data_and_pull_request_calls_use_non_force_installation_api(tmp_path):

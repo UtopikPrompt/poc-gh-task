@@ -46,8 +46,9 @@ class FakeGitHub:
     def get_project_item(self, item_node_id, installation_id):
         self.calls.append(("project", item_node_id, installation_id))
         return {
-            "is_target_project": True,
             "project_node_id": "PVT_project",
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
             "is_archived": False,
             "status_option_name": self.status,
             "done_option_name": "Done",
@@ -153,6 +154,8 @@ def _store(tmp_path, task_id="task-1"):
             {
                 "task_id": task_id,
                 "event_type": "ready",
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
                 "project_node_id": "PVT_project",
                 "project_item_id": "PVTI_item",
                 "target_repositories": ["example/project"],

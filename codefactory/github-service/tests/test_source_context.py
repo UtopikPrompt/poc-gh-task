@@ -88,9 +88,6 @@ def _source(tmp_path, *, contents=None, entries=None, truncated=False):
     github = GitHubAppClient(
         app_id=321,
         private_key_path=key_path,
-        project_owner="example-org",
-        project_owner_type="organization",
-        project_number=7,
         transport=httpx.MockTransport(handle),
     )
     return GitHubTaskSource(store=TaskStore(), github=github), github, requests

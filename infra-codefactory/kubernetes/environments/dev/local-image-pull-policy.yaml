@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: github-service
+        imagePullPolicy: IfNotPresent
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langgraph-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: langgraph-service
+        imagePullPolicy: IfNotPresent
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codefactory-database-migrations
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: copy-github-migrations
+        imagePullPolicy: IfNotPresent
+      - name: copy-langgraph-migration
+        imagePullPolicy: IfNotPresent
+      containers:
+      - name: migrate
+        imagePullPolicy: IfNotPresent

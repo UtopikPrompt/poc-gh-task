@@ -13,6 +13,8 @@ class FakeStore:
     def task_context(self, task_id):
         assert task_id == "task-1"
         return {
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
             "project_node_id": "PVT_project",
             "project_item_id": "PVTI_item",
             "target_repository": "example/project",
@@ -68,7 +70,13 @@ def test_completion_updates_only_the_mapped_project_item_after_revalidation():
     }
     assert github.marked == [
         (
-            {"project_node_id": "PVT_project", "project_item_id": "PVTI_item"},
+            {
+                "project_node_id": "PVT_project",
+                "project_item_id": "PVTI_item",
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
+                "target_repository": "example/project",
+            },
             654,
         )
     ]

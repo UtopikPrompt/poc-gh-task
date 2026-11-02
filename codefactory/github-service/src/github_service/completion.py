@@ -53,6 +53,8 @@ class GitHubTaskCompletion:
             or not pull_request_id
             or not isinstance(context.get("target_repository"), str)
             or context["target_repository"].lower() != repository.lower()
+            or not context.get("project_owner")
+            or context.get("project_owner_type") not in {"organization", "user"}
             or not context.get("project_item_id")
             or not context.get("project_node_id")
         ):
@@ -76,6 +78,9 @@ class GitHubTaskCompletion:
             {
                 "project_node_id": context["project_node_id"],
                 "project_item_id": context["project_item_id"],
+                "project_owner": context["project_owner"],
+                "project_owner_type": context["project_owner_type"],
+                "target_repository": context["target_repository"],
             },
             installation_id,
         )
