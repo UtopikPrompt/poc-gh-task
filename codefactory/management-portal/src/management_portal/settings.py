@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 
 
-GITHUB_OAUTH_CALLBACK_URL = "https://codefactory.utopiklab.com/auth/callback"
+GITHUB_OAUTH_CALLBACK_URL = "https://codefactory.utopiklab.com/auth"
 
 
 @dataclass(frozen=True)

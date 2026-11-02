@@ -119,7 +119,7 @@ def _login(client):
     assert authorization_query["redirect_uri"] == [GITHUB_OAUTH_CALLBACK_URL]
     assert authorization_query["scope"] == ["read:org"]
     callback_response = client.get(
-        "/auth/callback",
+        "/auth",
         params={"code": "authorization-code", "state": authorization_query["state"][0]},
         follow_redirects=False,
     )
@@ -456,14 +456,14 @@ def test_oauth_state_is_required_and_callback_query_is_redacted(tmp_path):
     @app.middleware("http")
     async def capture_callback_query_string(request, call_next):
         response = await call_next(request)
-        if request.url.path == "/auth/callback":
+        if request.url.path == "/auth":
             callback_query_strings.append(request.scope["query_string"])
         return response
 
     with TestClient(app, base_url="https://testserver") as client:
         login_response = client.get("/auth/login", follow_redirects=False)
         invalid_callback = client.get(
-            "/auth/callback",
+            "/auth",
             params={"code": "sensitive-auth-code", "state": "incorrect-state"},
         )
 

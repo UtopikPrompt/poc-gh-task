@@ -125,14 +125,15 @@ images, applies the idempotent SQL migrations, then runs LangGraph's
 `PostgresSaver.setup()` with the LangGraph login. Temporary schema-create access
 is revoked before the Job exits. Both application Deployments wait for their
 migration-created tables, so they cannot start against an uninitialized schema.
-The Job runs once per created Job object. The dev deploy script derives its SQL
-artifact checks from the Job's init-container copy commands. It resolves both
-public service tags to digests, inspects those digest references, and applies
-the same digest-pinned rendered manifest. Concurrent dev deploys are serialized
-by a create-only Kubernetes Lease; an existing Lease blocks another run. A
-terminal Job is deleted only with its observed UID as an API precondition, and
-the script refuses to replace active or nonterminal Jobs. A stale Lease after
-an interrupted runner requires an operator to verify the holder is gone before
+The Job runs once per created Job object. For dev, the deploy script checks
+that the Job's migration copy paths match every SQL file in the checked-out
+service sources. The Job pulls current service `:dev` images with
+`imagePullPolicy: Always`; a missing artifact causes its init container to fail
+before the migration command runs. Concurrent dev deploys are serialized by a
+create-only Kubernetes Lease; an existing Lease blocks another run. A terminal
+Job is deleted only with its observed UID as an API precondition, and the
+script refuses to replace active or nonterminal Jobs. A stale Lease after an
+interrupted runner requires an operator to verify the holder is gone before
 removing that Lease.
 
 Each service builds its PostgreSQL URL from the shared ConfigMap and its own
@@ -212,20 +213,24 @@ secret-management process.
 
 Use the dev deploy script only after configuring the non-secret values in
 `infra-codefactory/kubernetes/bases/platform/github-settings.yaml` and preparing
-the local dev secret files above. It requires `kubectl`, `crane`, `curl`, `jq`,
-`tar`, and `awk` on `PATH`, plus Bash 4 or newer (`mapfile` is used). `kubectl`
-must include its `kustomize` subcommand. Mike Farah `yq` v4, `sleep`, and
-`mktemp` are also required for structured digest pinning, bounded waits, and
-temporary files. Install the tools using the official
-project instructions for your OS and architecture; this runbook does not assume
-a distro or package manager:
+the local dev secret files above. It requires `kubectl`, `curl`, `jq`, `awk`,
+`sleep`, and `mktemp` on `PATH`, plus Bash 4 or newer (`mapfile` is used).
+`kubectl` must include its `kustomize` subcommand. The script uses kubectl's
+client-side YAML decoder for structured preflight checks; neither `crane` nor
+`yq` is required. Install the tools using the official project instructions
+for your OS and architecture; this runbook does not assume a distro or package
+manager:
+
+Before deploying after any possible credential exposure, confirm the affected
+provider credentials have been rotated and the local secret files contain the
+replacement values. Secret metadata alone is not proof unless it establishes a
+replacement after the exposure. The deploy script does not rotate provider
+credentials.
 
 - [kubectl installation](https://kubernetes.io/docs/tasks/tools/)
-- [crane installation](https://github.com/google/go-containerregistry/tree/main/cmd/crane)
 - [jq downloads](https://jqlang.org/download/)
-- [Mike Farah yq](https://github.com/mikefarah/yq)
 - [curl downloads](https://curl.se/download.html)
-- `tar`, `awk`, `sleep`, and `mktemp` must be available as command-line utilities; use the
+- `awk`, `sleep`, and `mktemp` must be available as command-line utilities; use the
   installation source for the operating system you administer.
 - [GNU Bash](https://www.gnu.org/software/bash/) documents Bash downloads and
   releases.
@@ -233,26 +238,29 @@ a distro or package manager:
 Check that the required commands resolve before proceeding:
 
 ```sh
-for tool in bash kubectl crane curl jq yq tar awk sleep mktemp; do
+for tool in bash kubectl curl jq awk sleep mktemp; do
   command -v "$tool" || exit 1
 done
 bash --version
 kubectl version --client
-crane version
 jq --version
-yq --version
 curl --version
 ```
 
 The script does not build or push images, log in to a registry, call GitHub
-APIs, or send webhooks/PRs. Before any apply, it resolves the public GHCR tags
-with `crane digest`, pins every service and migration Job image field in the
-rendered YAML with `yq`, exports each image by digest, and verifies all SQL
-paths copied by the migration Job. It then applies that exact pinned render,
-not the mutable-tag Kustomize output. If a file is missing, publish updated dev
-images with the repository's **Build and publish service images** workflow
-before retrying. The API proxy is bound only to `127.0.0.1`; it carries atomic
-UID-preconditioned deletes for the terminal Job and the Lease.
+APIs, or send webhooks/PRs. Before any apply, it renders the dev overlay and
+uses kubectl's client-side decoder plus `jq` to validate the expected public
+GHCR `:dev` image references, pull policies, database configuration, migration
+copy paths, and retained storage contract. The migration Job copies SQL from
+those service images and cannot start its migration command unless each copy
+succeeds. The script recreates a terminal migration Job, then restarts the
+GitHub, LangGraph, and management portal Deployments so each pulls the current
+tag; it does not change replica counts. The tags are mutable: their exact image
+digests can change independently of this checkout, and this dev path does not
+pin digests or verify image signatures/provenance. Confirm the image publishing
+workflow has completed before deploying. The API proxy is bound only to
+`127.0.0.1`; it carries atomic UID-preconditioned deletes for the terminal Job
+and the Lease.
 
 Set `CODEFACTORY_DEV_CONTEXT` to the exact intended development context name.
 The script prints the current context and stops unless it matches this explicit
@@ -274,9 +282,9 @@ CODEFACTORY_DEV_CONTEXT=your-dev-context bash infra-codefactory/kubernetes/envir
 
 Before applying anything, the script renders the dev overlay, checks the
 required GitHub App and in-cluster PostgreSQL configuration without printing
-secret contents, verifies readable local secret inputs, resolves and pins both
-service image digests, checks every migration SQL artifact, and inspects
-storage and existing dev resources before mutation. It verifies the rendered
+secret contents, verifies readable local secret inputs, checks the mutable
+`:dev` image references and migration copy paths, and inspects storage and
+existing dev resources before mutation. It verifies the rendered
 StorageClass/PV contract and requires any already-existing cluster objects with
 those names to match it exactly; absent objects are supplied by the rendered
 dev overlay. The script only removes an existing PVC/StatefulSet when the
@@ -286,7 +294,7 @@ unchanged. Deletions use UID preconditions and bounded waits. Any bound PVC,
 non-Pending claim, unexpected class, changed UID, or mismatched identity blocks
 recovery; the script never deletes a bound PVC/PV or database data. The
 PostgreSQL PVC then waits to bind, followed by PostgreSQL, the migration Job,
-and both Deployments. It holds a Kubernetes Lease throughout deployment and
+and all three Deployments. It holds a Kubernetes Lease throughout deployment and
 replaces the migration Job only when it is already Complete or Failed, using
 the observed UID as a delete precondition; an active or nonterminal Job blocks
 deployment. Finally, it checks
@@ -295,117 +303,21 @@ cleaned up on exit.
 
 If the `codefactory` namespace does not exist, the script applies only the
 namespace resource first, acquires the deployment Lease, invokes the existing
-dev secrets apply script, and applies the digest-pinned render.
+dev secrets apply script, and applies the rendered dev overlay.
 
 ### Non-Cluster Preflight Checks
 
-The following mock check runs from the repository root and requires the
-prepared dev secret files because the deploy script validates their presence
-and shape. It does not read or print their values. The real `kubectl` binary is
-used once to render the overlay locally before the mock is installed; all
-`kubectl` calls made by the deploy script are mocked. Mike Farah `yq` v4 is
-used for the structured reads/pinning, while `crane` is mocked, so neither the
-cluster nor GHCR is contacted. The mock rejects every unexpected `kubectl`
-command and checks that resource mutation, proxy, and port-forward commands
-were not invoked. In addition to Bash, the snippet uses `cat`, `chmod`, `grep`,
-`mkdir`, `mktemp`, and `touch`.
+Run the secret-free, offline dev deployment contract check from the repository
+root:
 
 ```sh
-real_kubectl="$(command -v kubectl)"
-ulimit -c 0
-mock_root="$(mktemp -d)"
-trap 'rm -rf "$mock_root"' EXIT
-"$real_kubectl" kustomize infra-codefactory/kubernetes/environments/dev \
-  > "$mock_root/dev.yaml"
-mkdir -p "$mock_root/bin" "$mock_root/artifacts/app/migrations"
-touch "$mock_root/artifacts/app/migrations/001_github_event_queue.sql"
-touch "$mock_root/artifacts/app/migrations/002_service_roles.sql"
-touch "$mock_root/artifacts/app/migrations/003_github_task_installation.sql"
-touch "$mock_root/artifacts/app/migrations/001_checkpoint_schema.sql"
-cat > "$mock_root/bin/kubectl" <<'MOCK'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$MOCK_CALL_LOG"
-case "$*" in
-  'config current-context') printf '%s\n' "$CODEFACTORY_DEV_CONTEXT" ;;
-  kustomize\ *) cat "$MOCK_RENDERED_MANIFEST" ;;
-  'get storageclass codefactory-ssd -o json --ignore-not-found') printf '%s' "$MOCK_STORAGE_CLASS_JSON" ;;
-  'get pv codefactory-postgres-data -o json --ignore-not-found') printf '%s' "$MOCK_PV_JSON" ;;
-  *) printf 'Unexpected kubectl call: %s\n' "$*" >&2; exit 97 ;;
-esac
-MOCK
-cat > "$mock_root/bin/crane" <<'MOCK'
-#!/usr/bin/env bash
-case "$1" in
-  digest) printf 'sha256:%064d\n' 1 ;;
-  export)
-    artifacts=()
-    for path in \
-      app/migrations/001_github_event_queue.sql \
-      app/migrations/002_service_roles.sql \
-      app/migrations/003_github_task_installation.sql \
-      app/migrations/001_checkpoint_schema.sql; do
-      [[ "$path" == "$MOCK_MISSING_ARTIFACT" ]] || artifacts+=("$path")
-    done
-    tar -cf - -C "$MOCK_ROOT/artifacts" "${artifacts[@]}"
-    ;;
-  *) exit 98 ;;
-esac
-MOCK
-chmod +x "$mock_root/bin/kubectl" "$mock_root/bin/crane"
-export MOCK_ROOT="$mock_root"
-export MOCK_CALL_LOG="$mock_root/kubectl.log"
-export MOCK_RENDERED_MANIFEST="$mock_root/dev.yaml"
-export CODEFACTORY_DEV_CONTEXT=mock-dev-context
-
-run_preflight_case() {
-  local case_name="$1"
-  local missing_artifact="$2"
-  local expected="$3"
-  local storage_class_json="${4:-}"
-  local pv_json="${5:-}"
-  : > "$MOCK_CALL_LOG"
-  if PATH="$mock_root/bin:$PATH" MOCK_MISSING_ARTIFACT="$missing_artifact" \
-    MOCK_STORAGE_CLASS_JSON="$storage_class_json" MOCK_PV_JSON="$pv_json" bash \
-    infra-codefactory/kubernetes/environments/dev/deploy.sh \
-    > "$mock_root/$case_name.log" 2>&1; then
-    printf 'FAIL: %s unexpectedly passed\n' "$case_name" >&2
-    return 1
-  fi
-  if ! grep -F "$expected" "$mock_root/$case_name.log"; then
-    printf 'FAIL: %s did not report the expected preflight error\n' "$case_name" >&2
-    return 1
-  fi
-  if grep -Eq '(^|[[:space:]])(apply|create|delete|proxy|port-forward)([[:space:]]|$)' "$MOCK_CALL_LOG"; then
-    printf 'FAIL: %s invoked a forbidden kubectl operation\n' "$case_name" >&2
-    return 1
-  fi
-  printf 'PASS: %s stopped before apply/delete/port-forward\n' "$case_name"
-}
-
-run_preflight_case missing-github-event-queue \
-  app/migrations/001_github_event_queue.sql 'lacks app/migrations/001_github_event_queue.sql'
-run_preflight_case missing-service-roles \
-  app/migrations/002_service_roles.sql 'lacks app/migrations/002_service_roles.sql'
-run_preflight_case missing-task-installation \
-  app/migrations/003_github_task_installation.sql 'lacks app/migrations/003_github_task_installation.sql'
-run_preflight_case missing-checkpoint-schema \
-  app/migrations/001_checkpoint_schema.sql 'lacks app/migrations/001_checkpoint_schema.sql'
-run_preflight_case mismatched-storage-class '' \
-  'Live StorageClass codefactory-ssd does not exactly match the dev overlay contract.' \
-  '{"metadata":{"name":"codefactory-ssd"},"provisioner":"unexpected"}' ''
-valid_storage_class='{"apiVersion":"storage.k8s.io/v1","kind":"StorageClass","metadata":{"name":"codefactory-ssd"},"provisioner":"kubernetes.io/no-provisioner","reclaimPolicy":"Retain","volumeBindingMode":"WaitForFirstConsumer"}'
-run_preflight_case mismatched-postgres-volume '' \
-  'Live PersistentVolume codefactory-postgres-data does not exactly match the dev overlay contract.' \
-  "$valid_storage_class" '{"metadata":{"name":"codefactory-postgres-data"},"spec":{}}'
+bash infra-codefactory/kubernetes/environments/dev/check-deploy-contract.sh
 ```
 
-Expected results are `PASS` for all six cases: each of the four SQL artifacts
-is independently required, and mismatched live StorageClass and PV definitions
-are rejected. Missing-artifact cases stop before any StorageClass query. Any
-unexpected Kubernetes command, or any attempt to mutate resources, start a
-proxy, or port-forward, fails the check. These mock results validate preflight
-ordering only; they do not prove cluster access, storage provisioning, image
-availability, or deployment readiness.
+The check runs `bash -n`, renders the overlay with kubectl, and confirms the
+exact `:dev` image references, `Always` pull policies, and complete migration
+copy lists against repository sources. It does not contact the cluster or
+registry, read local secrets, or prove remote image availability or provenance.
 
 ## Ingress
 

@@ -7,7 +7,7 @@ spec:
     spec:
       containers:
       - name: github-service
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
       - name: langgraph-service
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
 ---
 apiVersion: batch/v1
 kind: Job
@@ -29,9 +29,9 @@ spec:
     spec:
       initContainers:
       - name: copy-github-migrations
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
       - name: copy-langgraph-migration
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
       containers:
       - name: migrate
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always

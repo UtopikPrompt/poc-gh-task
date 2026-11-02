@@ -29,7 +29,7 @@
                 }
             }
         },
-        "/auth/callback": {
+        "/auth": {
             "get": {
                 "operationId": "completeGitHubOAuth",
                 "responses": {

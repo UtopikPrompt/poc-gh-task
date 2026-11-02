@@ -37,7 +37,7 @@ def install_oauth_callback_query_redaction(app: FastAPI) -> None:
     @app.middleware("http")
     async def redact_oauth_callback_query(request: Request, call_next):
         query_token = None
-        if request.url.path == "/auth/callback":
+        if request.url.path == "/auth":
             query_token = OAUTH_CALLBACK_QUERY.set(
                 parse_qs(
                     request.scope.get("query_string", b"").decode("latin-1"),
@@ -146,7 +146,7 @@ def clear_oauth_state_cookie(
 ) -> None:
     response.delete_cookie(
         DASHBOARD_STATE_COOKIE,
-        path="/auth/callback",
+        path="/auth",
         secure=True,
         httponly=True,
         samesite="lax",

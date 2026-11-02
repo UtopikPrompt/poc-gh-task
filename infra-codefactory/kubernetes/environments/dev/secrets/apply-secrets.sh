@@ -116,7 +116,7 @@ if ! awk '
   exit 1
 fi
 
-printf 'Configure %s with your GitHub OAuth values. Set the callback URL to https://codefactory.utopiklab.com/auth/callback; request scope read:org; allowed organization: UtopikPrompt.\n' \
+printf 'Configure %s with your GitHub OAuth values. Set the callback URL to https://codefactory.utopiklab.com/auth; request scope read:org; allowed organization: UtopikPrompt.\n' \
   "$dashboard_oauth_env"
 
 if [[ "$oauth_only" != true ]]; then

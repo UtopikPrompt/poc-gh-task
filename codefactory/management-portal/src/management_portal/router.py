@@ -242,11 +242,11 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             httponly=True,
             secure=True,
             samesite="lax",
-            path="/auth/callback",
+            path="/auth",
         )
         return response
 
-    @router.get("/auth/callback")
+    @router.get("/auth")
     async def dashboard_oauth_callback(request: Request):
         require_dashboard_auth_configuration(settings)
         query = OAUTH_CALLBACK_QUERY.get() or {}
