@@ -22,8 +22,9 @@ from github_service.fastapi import (
     create_http_app,
 )
 from github_service.github_app import GitHubAppClient
-from github_service.publishing import GitHubTaskPublisher
+from github_service.publishing import FileChangeProposal, GitHubTaskPublisher
 from github_service.settings import RuntimeSettings
+from github_service.source_context import GitHubTaskSource
 from github_service.webhook_service import (
     EventNormalizer,
     WebhookService,
@@ -37,8 +38,11 @@ def create_app(
     close_resources: Sequence[Callable[[], None]] = (),
     complete_task_factory: Callable[[object], Callable[[str], dict[str, object]]]
     | None = None,
-    publish_pull_request_factory: Callable[[object], Callable[..., dict[str, object]]]
+    propose_file_changes_factory: Callable[
+        [object], Callable[[FileChangeProposal], dict[str, object]]
+    ]
     | None = None,
+    source_context_factory: Callable[[object], GitHubTaskSource] | None = None,
 ) -> FastAPI:
     settings = settings or RuntimeSettings.from_environment()
 
@@ -48,6 +52,11 @@ def create_app(
             PostgresDeliveryStore(settings.github_database_url)
             if settings.github_database_url
             else SQLiteDeliveryStore(settings.database_path)
+        )
+        source_context = (
+            source_context_factory(store)
+            if source_context_factory is not None
+            else None
         )
         service = WebhookService(store=store, normalize_event=normalize_event)
         app.state.webhook_runtime = WebhookRuntime(
@@ -64,10 +73,16 @@ def create_app(
                 if complete_task_factory is not None
                 else None
             ),
-            publish_pull_request=(
-                publish_pull_request_factory(store)
-                if publish_pull_request_factory is not None
+            propose_file_changes=(
+                propose_file_changes_factory(store)
+                if propose_file_changes_factory is not None
                 else None
+            ),
+            get_source_tree=(
+                source_context.candidate_paths if source_context is not None else None
+            ),
+            get_source_files=(
+                source_context.read_files if source_context is not None else None
             ),
         )
         try:
@@ -86,16 +101,12 @@ def create_github_app(
 ) -> FastAPI:
     """Create the standalone GitHub webhook and capability service."""
     settings = settings or RuntimeSettings.from_environment()
-    if not settings.project_ready_option_id:
-        raise ValueError("GITHUB_PROJECT_READY_OPTION_ID must be configured")
-
     client = GitHubAppClient.from_settings(settings)
     normalizer = GitHubEventNormalizer(
         client,
         ProjectEventConfig(
-            project_node_id=settings.project_node_id,
-            status_field_id=settings.project_status_field_id,
-            ready_option_id=settings.project_ready_option_id,
+            status_field_name=settings.project_status_field_name,
+            ready_option_name=settings.project_ready_option_name,
         ),
     )
     return create_app(
@@ -105,13 +116,16 @@ def create_github_app(
         complete_task_factory=lambda store: GitHubTaskCompletion(
             store=store,
             github=client,
-            project_node_id=settings.project_node_id,
         ),
-        publish_pull_request_factory=lambda store: (
+        propose_file_changes_factory=lambda store: (
             GitHubTaskPublisher(
                 store=store,
                 github=client,
             ).publish
+        ),
+        source_context_factory=lambda store: GitHubTaskSource(
+            store=store,
+            github=client,
         ),
     )
 
@@ -120,7 +134,7 @@ def create_host_app() -> FastAPI:
     """Create the production GitHub service using PostgreSQL and App credentials."""
     settings = RuntimeSettings.from_environment()
     if not settings.github_database_url:
-        raise ValueError("GITHUB_DATABASE_URL must be configured for production")
+        raise ValueError("GITHUB_DB_* settings must be configured for production")
     if not settings.internal_service_token:
         raise ValueError("INTERNAL_SERVICE_TOKEN must be configured")
     return create_github_app(settings=settings)

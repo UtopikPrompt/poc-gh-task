@@ -3,7 +3,7 @@
     "info": {
         "title": "Codefactory LangGraph Service",
         "version": "1.0.0",
-        "description": "The worker exposes health only; event and GitHub operations use the GitHub Service contract."
+        "description": "Private bearer-authenticated management APIs expose only validated non-secret agent configuration and allowlisted workflow checkpoint projections. Raw checkpoint blobs and issue/source payloads are never returned."
     },
     "paths": {
         "/healthz": {
@@ -30,6 +30,391 @@
                         }
                     }
                 }
+            }
+        },
+        "/readyz": {
+            "get": {
+                "operationId": "readyz",
+                "responses": {
+                    "200": {
+                        "description": "Service and required inference dependency are ready",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "status"
+                                    ],
+                                    "properties": {
+                                        "status": {
+                                            "const": "ok"
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "A required dependency is unavailable",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "status",
+                                        "dependency"
+                                    ],
+                                    "properties": {
+                                        "status": {
+                                            "const": "unavailable"
+                                        },
+                                        "dependency": {
+                                            "const": "local_model"
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/internal/management/agent-config": {
+            "get": {
+                "operationId": "getAgentConfig",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Current effective configuration and audit metadata",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AgentConfigRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "503": {
+                        "description": "Configuration store unavailable"
+                    }
+                }
+            },
+            "put": {
+                "operationId": "updateAgentConfig",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AgentConfigUpdate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Configuration override saved for new workflow runs",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AgentConfigRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "422": {
+                        "description": "Configuration failed validation"
+                    },
+                    "503": {
+                        "description": "Configuration store unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/executions": {
+            "get": {
+                "operationId": "listExecutions",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "limit",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 100
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe execution summaries",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExecutionList"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "503": {
+                        "description": "Execution store unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/executions/{thread_id}": {
+            "get": {
+                "operationId": "getExecution",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "thread_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe checkpoint history projection",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExecutionDetail"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "404": {
+                        "description": "Execution not found"
+                    },
+                    "503": {
+                        "description": "Execution store unavailable"
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer"
+            }
+        },
+        "schemas": {
+            "AgentConfig": {
+                "type": "object",
+                "required": [
+                    "completion_timeout_seconds"
+                ],
+                "properties": {
+                    "completion_timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 90,
+                        "default": 45,
+                        "description": "Existing local-model request timeout; applies to new workflow runs."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AgentConfigUpdate": {
+                "type": "object",
+                "required": [
+                    "completion_timeout_seconds",
+                    "updated_by"
+                ],
+                "properties": {
+                    "completion_timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 90,
+                        "default": 45
+                    },
+                    "updated_by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AgentConfigRecord": {
+                "type": "object",
+                "required": [
+                    "config",
+                    "version",
+                    "updated_at",
+                    "updated_by"
+                ],
+                "properties": {
+                    "config": {
+                        "$ref": "#/components/schemas/AgentConfig"
+                    },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "updated_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ExecutionSummary": {
+                "type": "object",
+                "required": [
+                    "thread_id",
+                    "checkpoint_id",
+                    "created_at",
+                    "step"
+                ],
+                "properties": {
+                    "thread_id": {
+                        "type": "string",
+                        "maxLength": 200
+                    },
+                    "checkpoint_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "step": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "workflow_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "waiting_for": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "task_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "event_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "event_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ExecutionList": {
+                "type": "object",
+                "required": [
+                    "executions"
+                ],
+                "properties": {
+                    "executions": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "$ref": "#/components/schemas/ExecutionSummary"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ExecutionDetail": {
+                "type": "object",
+                "required": [
+                    "thread_id",
+                    "checkpoints"
+                ],
+                "properties": {
+                    "thread_id": {
+                        "type": "string",
+                        "maxLength": 200
+                    },
+                    "checkpoints": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                            "$ref": "#/components/schemas/ExecutionSummary"
+                        }
+                    }
+                },
+                "additionalProperties": false
             }
         }
     }

@@ -18,9 +18,14 @@ class CompletionGitHubAPI(Protocol):
         repository: str,
         pull_request_number: int,
         expected_pull_request_id: str,
+        installation_id: int,
     ) -> Mapping[str, object]: ...
 
-    def mark_task_done(self, state: Mapping[str, object]) -> Mapping[str, object]: ...
+    def mark_task_done(
+        self,
+        state: Mapping[str, object],
+        installation_id: int,
+    ) -> Mapping[str, object]: ...
 
 
 class GitHubTaskCompletion:
@@ -29,11 +34,9 @@ class GitHubTaskCompletion:
         *,
         store: CompletionStore,
         github: CompletionGitHubAPI,
-        project_node_id: str,
     ):
         self._store = store
         self._github = github
-        self._project_node_id = project_node_id
 
     def __call__(self, task_id: str) -> dict[str, object]:
         pull_request = self._store.pull_request_for_task(task_id)
@@ -48,17 +51,26 @@ class GitHubTaskCompletion:
             or not isinstance(number, int)
             or not isinstance(pull_request_id, str)
             or not pull_request_id
-            or context.get("project_node_id") != self._project_node_id
             or not isinstance(context.get("target_repository"), str)
             or context["target_repository"].lower() != repository.lower()
+            or not context.get("project_owner")
+            or context.get("project_owner_type") not in {"organization", "user"}
             or not context.get("project_item_id")
+            or not context.get("project_node_id")
         ):
+            return {"completed": False, "reason": "task_mapping_invalid"}
+        try:
+            installation_id = int(context["installation_id"])
+        except (KeyError, ValueError):
+            return {"completed": False, "reason": "task_mapping_invalid"}
+        if installation_id <= 0:
             return {"completed": False, "reason": "task_mapping_invalid"}
 
         verification = self._github.verify_pull_request_completion(
             repository,
             number,
             pull_request_id,
+            installation_id,
         )
         if verification.get("verified") is not True:
             return {"completed": False, "reason": "merge_or_checks_unverified"}
@@ -66,6 +78,10 @@ class GitHubTaskCompletion:
             {
                 "project_node_id": context["project_node_id"],
                 "project_item_id": context["project_item_id"],
-            }
+                "project_owner": context["project_owner"],
+                "project_owner_type": context["project_owner_type"],
+                "target_repository": context["target_repository"],
+            },
+            installation_id,
         )
         return {"completed": True, "project_update": dict(project_update)}

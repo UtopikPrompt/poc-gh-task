@@ -31,12 +31,13 @@ def _decode(
 
 
 def test_valid_delivery_decodes_authenticated_github_event():
-    body = json.dumps({"action": "edited"}).encode()
+    body = json.dumps({"action": "edited", "installation": {"id": 654}}).encode()
     webhook = _decode(body, _signature(body))
 
     assert webhook.event_name == "projects_v2_item"
     assert webhook.delivery_id == "delivery-1"
-    assert webhook.payload == {"action": "edited"}
+    assert webhook.installation_id == 654
+    assert webhook.payload == {"action": "edited", "installation": {"id": 654}}
 
 
 def test_invalid_signature_is_rejected_before_payload_parsing():
@@ -51,9 +52,37 @@ def test_invalid_signature_is_rejected_before_payload_parsing():
         (b"[]", "projects_v2_item", "delivery-1", TypeError),
         (b"{}", "", "delivery-1", ValueError),
         (b"{}", "projects_v2_item", "", ValueError),
+        (
+            b'{"installation": {"id": 0}}',
+            "projects_v2_item",
+            "delivery-1",
+            ValueError,
+        ),
+        (
+            b'{"installation": {"id": "654"}}',
+            "projects_v2_item",
+            "delivery-1",
+            None,
+        ),
+        (
+            b'{"installation": {"id": true}}',
+            "projects_v2_item",
+            "delivery-1",
+            ValueError,
+        ),
+        (b"{}", "projects_v2_item", "delivery-1", ValueError),
     ],
 )
 def test_invalid_verified_webhook_is_rejected(body, event_name, delivery_id, exception):
+    if exception is None:
+        webhook = _decode(
+            body,
+            _signature(body),
+            event_name=event_name,
+            delivery_id=delivery_id,
+        )
+        assert webhook.installation_id == 654
+        return
     with pytest.raises(exception):
         _decode(
             body,

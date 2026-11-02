@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
-from github_service.events import GitHubWebhook
+from github_service.events import (
+    GitHubWebhook,
+    _log_webhook_decision,
+    normalize_installation_id,
+)
 
 
 class DeliveryStore(Protocol):
@@ -54,11 +58,16 @@ class WebhookService:
         delivery_id = webhook.delivery_id
         claim = self._store.claim_delivery(delivery_id)
         if claim == "duplicate":
+            _log_webhook_decision(webhook, "duplicate")
             return {"status": "duplicate", "delivery_id": delivery_id}
         if claim == "in_progress":
+            _log_webhook_decision(webhook, "duplicate")
             return {"status": "in_progress", "delivery_id": delivery_id}
 
+        failure_reason = "processing_failure"
         try:
+            webhook_installation_id = normalize_installation_id(webhook.installation_id)
+            failure_reason = "resolver_or_repository_validation_failure"
             normalized = self._normalize_event(webhook, self._store)
             if normalized is None:
                 response: dict[str, object] = {
@@ -76,18 +85,30 @@ class WebhookService:
                 if events is None or any(
                     not isinstance(event, Mapping) for event in events
                 ):
+                    failure_reason = "normalized_event_validation_failure"
                     raise TypeError("event normalizer must return mapping events")
                 normalized_events: list[Mapping[str, object]] = []
                 for event in events:
                     task_id_value = event.get("task_id")
                     event_type = event.get("event_type")
                     if not isinstance(task_id_value, str) or not task_id_value.strip():
+                        failure_reason = "normalized_event_validation_failure"
                         raise ValueError("normalized event must include a task_id")
                     if event_type not in {"ready", "ci", "merged"}:
+                        failure_reason = "normalized_event_validation_failure"
                         raise ValueError(
                             "normalized event has an unsupported event_type"
                         )
                     normalized_event = dict(event)
+                    event_installation_id = normalize_installation_id(
+                        normalized_event.get("installation_id")
+                    )
+                    if event_installation_id != webhook_installation_id:
+                        failure_reason = "normalized_event_validation_failure"
+                        raise ValueError(
+                            "normalized event installation does not match webhook"
+                        )
+                    normalized_event["installation_id"] = event_installation_id
                     normalized_event["webhook_delivery_id"] = delivery_id
                     normalized_events.append(normalized_event)
                 if not normalized_events:
@@ -104,7 +125,10 @@ class WebhookService:
                         "event_ids": event_ids,
                     }
             self._store.complete_delivery(delivery_id, response)
+            if response["status"] == "queued":
+                _log_webhook_decision(webhook, "accepted")
             return response
         except Exception:
+            _log_webhook_decision(webhook, failure_reason)
             self._store.fail_delivery(delivery_id)
             raise

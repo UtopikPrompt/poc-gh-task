@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codefactory-database-config
+data:
+  GITHUB_DB_HOST: codefactory-postgres
+  GITHUB_DB_SSLMODE: disable
+  LANGGRAPH_DB_HOST: codefactory-postgres
+  LANGGRAPH_DB_SSLMODE: disable

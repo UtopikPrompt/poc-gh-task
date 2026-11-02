@@ -7,7 +7,18 @@
         "event_type",
         "event_pull_request_id",
         "merged",
+        "installation_id",
         "webhook_delivery_id"
+    ],
+    "examples": [
+        {
+            "task_id": "PVTI_item",
+            "event_type": "merged",
+            "event_pull_request_id": "9001",
+            "merged": true,
+            "installation_id": 654,
+            "webhook_delivery_id": "delivery-3"
+        }
     ],
     "properties": {
         "task_id": {
@@ -21,6 +32,10 @@
         },
         "merged": {
             "type": "boolean"
+        },
+        "installation_id": {
+            "type": "integer",
+            "minimum": 1
         },
         "webhook_delivery_id": {
             "type": "string"

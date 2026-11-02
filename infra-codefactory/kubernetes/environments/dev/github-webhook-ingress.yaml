@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: github-webhook
+  namespace: codefactory
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: codefactory.utopiklab.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: management-portal
+            port:
+              number: 8000
+      - path: /webhooks/github
+        pathType: Exact
+        backend:
+          service:
+            name: github-service
+            port:
+              number: 8000

@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
-import threading
-import time
+import base64
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from contextlib import contextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Iterator
+from urllib.parse import quote, urlparse
 
-import httpx
-import jwt
+from githubkit import GitHub
+from githubkit._httpx import httpx
+from githubkit.auth import AppAuthStrategy
+from githubkit.cache import MemCacheStrategy
+from githubkit.exception import GraphQLFailed, RequestError as GitHubRequestError
 
 from github_service.settings import RuntimeSettings
+
+
+def _set_api_version(request: httpx.Request) -> None:
+    request.headers["X-GitHub-Api-Version"] = "2022-11-28"
 
 
 class GitHubAppClient:
@@ -21,84 +29,113 @@ class GitHubAppClient:
         self,
         *,
         app_id: int,
-        installation_id: int,
         private_key_path: Path,
         api_url: str = "https://api.github.com",
-        status_field_id: str,
-        done_option_id: str,
+        status_field_name: str = "Status",
+        ready_option_name: str = "Ready",
+        done_option_name: str = "Done",
         transport: httpx.BaseTransport | None = None,
     ):
+        if app_id <= 0:
+            raise ValueError("GITHUB_APP_ID must be a positive integer")
+        if not all(
+            name.strip()
+            for name in (status_field_name, ready_option_name, done_option_name)
+        ):
+            raise ValueError("GitHub Project status names must not be empty")
         self._app_id = app_id
-        self._installation_id = installation_id
+        self._status_field_name = status_field_name
+        self._ready_option_name = ready_option_name
+        self._done_option_name = done_option_name
         self._private_key = private_key_path.read_text(encoding="utf-8")
         self._api_url = api_url.rstrip("/")
-        self._status_field_id = status_field_id
-        self._done_option_id = done_option_id
-        self._client = httpx.Client(
+        self._app_auth = AppAuthStrategy(app_id, self._private_key)
+        self._github = GitHub(
+            self._app_auth,
             base_url=self._api_url,
-            transport=transport,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            },
             timeout=30.0,
+            transport=transport,
+            auto_retry=False,
+            http_cache=False,
+            cache_strategy=MemCacheStrategy(),
+            event_hooks={"request": [_set_api_version]},
         )
-        self._token: str | None = None
-        self._token_expires_at = datetime.min.replace(tzinfo=UTC)
-        self._token_lock = threading.Lock()
 
     @classmethod
     def from_settings(cls, settings: RuntimeSettings) -> GitHubAppClient:
         required = {
             "GITHUB_APP_ID": settings.github_app_id,
-            "GITHUB_INSTALLATION_ID": settings.github_installation_id,
             "GITHUB_PRIVATE_KEY_PATH": settings.github_private_key_path,
-            "GITHUB_PROJECT_NODE_ID": settings.project_node_id,
-            "GITHUB_PROJECT_STATUS_FIELD_ID": settings.project_status_field_id,
-            "GITHUB_PROJECT_DONE_OPTION_ID": settings.project_done_option_id,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise ValueError(f"GitHub App settings are missing: {', '.join(missing)}")
+        if settings.github_app_id <= 0:
+            raise ValueError("GITHUB_APP_ID must be a positive integer")
         return cls(
             app_id=settings.github_app_id,
-            installation_id=settings.github_installation_id,
             private_key_path=settings.github_private_key_path,
             api_url=settings.github_api_url,
-            status_field_id=settings.project_status_field_id,
-            done_option_id=settings.project_done_option_id,
+            status_field_name=settings.project_status_field_name,
+            ready_option_name=settings.project_ready_option_name,
+            done_option_name=settings.project_done_option_name,
         )
 
-    def get_project_item(self, item_node_id: str) -> Mapping[str, object]:
+    def get_project_item(
+        self,
+        item_node_id: str,
+        installation_id: int,
+    ) -> Mapping[str, object]:
         result = self._graphql(
             """
             query($itemId: ID!) {
               node(id: $itemId) {
                 ... on ProjectV2Item {
                   id
-                  project { id }
+                                    isArchived
+                                    project {
+                                        id
+                                        owner {
+                                            __typename
+                                            ... on Organization { login }
+                                            ... on User { login }
+                                        }
+                                        fields(first: 100) {
+                                            nodes {
+                                                ... on ProjectV2SingleSelectField {
+                                                    id
+                                                    name
+                                                    options { id name }
+                                                }
+                                            }
+                                            pageInfo { hasNextPage }
+                                        }
+                                    }
                   content {
                     ... on Issue {
                       number
+                                            state
                       title
                       body
                       repository { nameWithOwner }
                     }
                   }
-                  fieldValues(first: 100) {
+                                    fieldValues(first: 100) {
                     nodes {
                       ... on ProjectV2ItemFieldSingleSelectValue {
                         name
                         optionId
-                        field { ... on ProjectV2SingleSelectField { id } }
+                                                field { ... on ProjectV2SingleSelectField { id name } }
                       }
                     }
+                                        pageInfo { hasNextPage }
                   }
                 }
               }
             }
             """,
             {"itemId": item_node_id},
+            installation_id=installation_id,
         )
         item = result.get("node")
         if not isinstance(item, Mapping):
@@ -107,34 +144,89 @@ class GitHubAppClient:
         content = item.get("content")
         if not isinstance(project, Mapping) or not isinstance(content, Mapping):
             raise TypeError("Project item must contain a project and issue")
+        project_id = project.get("id")
+        if not isinstance(project_id, str) or not project_id:
+            raise TypeError("Project item is missing its Project node ID")
+        if item.get("id") != item_node_id:
+            raise ValueError("GitHub returned a different Project item")
+        project_owner = project.get("owner")
+        owner_login = (
+            project_owner.get("login") if isinstance(project_owner, Mapping) else None
+        )
+        owner_type = (
+            project_owner.get("__typename")
+            if isinstance(project_owner, Mapping)
+            else None
+        )
+        owner_types = {"Organization": "organization", "User": "user"}
+        if (
+            not isinstance(owner_login, str)
+            or not owner_login.strip()
+            or owner_type not in owner_types
+        ):
+            raise TypeError("Project owner is unavailable or unsupported")
+        status_field_id, ready_option_id, done_option_id = (
+            self._project_status_configuration(project)
+        )
         repository = content.get("repository")
         field_values = item.get("fieldValues")
+        page_info = (
+            field_values.get("pageInfo") if isinstance(field_values, Mapping) else None
+        )
+        if (
+            not isinstance(page_info, Mapping)
+            or page_info.get("hasNextPage") is not False
+        ):
+            raise RuntimeError("GitHub Project item field values are incomplete")
         values = (
             field_values.get("nodes") if isinstance(field_values, Mapping) else None
         )
         status_option_id = None
+        status_option_name = None
+        status_value_count = 0
         if isinstance(values, list):
             for value in values:
                 if not isinstance(value, Mapping):
                     continue
                 field = value.get("field")
-                if (
-                    isinstance(field, Mapping)
-                    and field.get("id") == self._status_field_id
-                ):
+                if isinstance(field, Mapping) and field.get("id") == status_field_id:
+                    status_value_count += 1
                     status_option_id = value.get("optionId")
-                    break
+                    status_option_name = value.get("name")
+        if status_value_count > 1:
+            raise RuntimeError("GitHub Project item has ambiguous status values")
         if not isinstance(repository, Mapping):
             raise TypeError("Project item issue is missing its repository")
+        repository_name = repository.get("nameWithOwner")
+        if not isinstance(repository_name, str) or not repository_name.strip():
+            raise TypeError("Project item issue is missing its repository")
+        repository_info = self.get_repository(repository_name, installation_id)
+        accessible_repository = repository_info.get("full_name")
+        if (
+            not isinstance(accessible_repository, str)
+            or accessible_repository.casefold() != repository_name.casefold()
+        ):
+            raise ValueError(
+                "Project item issue repository is not accessible to this installation"
+            )
         return {
-            "project_node_id": project.get("id"),
-            "status_field_id": self._status_field_id,
+            "project_node_id": project_id,
+            "project_owner": owner_login,
+            "project_owner_type": owner_types[owner_type],
+            "status_field_id": status_field_id,
             "status_option_id": status_option_id,
+            "ready_option_id": ready_option_id,
+            "done_option_id": done_option_id,
+            "status_field_name": self._status_field_name,
+            "status_option_name": status_option_name,
+            "is_archived": item.get("isArchived"),
+            "done_option_name": self._done_option_name,
             "issue": {
                 "number": content.get("number"),
+                "state": content.get("state"),
                 "title": content.get("title"),
                 "body": content.get("body"),
-                "repository": repository.get("nameWithOwner"),
+                "repository": repository_name,
             },
         }
 
@@ -142,31 +234,43 @@ class GitHubAppClient:
         self,
         repository: str,
         pull_request_number: int,
+        installation_id: int,
     ) -> Mapping[str, object]:
-        pull_request = self._request(
-            "GET",
-            f"/repos/{repository}/pulls/{pull_request_number}",
-        )
-        if not isinstance(pull_request, Mapping):
-            raise TypeError("GitHub returned an invalid pull request")
-        head = pull_request.get("head")
-        if not isinstance(head, Mapping):
-            raise TypeError("GitHub pull request is missing head information")
-        head_sha = head.get("sha")
-        pull_request_id = pull_request.get("id")
-        if not isinstance(head_sha, str) or not isinstance(pull_request_id, int):
-            raise TypeError("GitHub pull request is missing its id or head SHA")
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            pull_request = client.rest.pulls.get(
+                owner, repo, pull_request_number
+            ).json()
+            if not isinstance(pull_request, Mapping):
+                raise TypeError("GitHub returned an invalid pull request")
+            head = pull_request.get("head")
+            if not isinstance(head, Mapping):
+                raise TypeError("GitHub pull request is missing head information")
+            head_sha = head.get("sha")
+            pull_request_id = pull_request.get("id")
+            if not isinstance(head_sha, str) or not isinstance(pull_request_id, int):
+                raise TypeError("GitHub pull request is missing its id or head SHA")
+            checks = list(
+                client.rest.paginate(
+                    client.rest.checks.list_for_ref,
+                    map_func=self._pagination_mapper("check_runs"),
+                    owner=owner,
+                    repo=repo,
+                    ref=head_sha,
+                    per_page=100,
+                )
+            )
+            statuses = list(
+                client.rest.paginate(
+                    client.rest.repos.list_commit_statuses_for_ref,
+                    map_func=self._pagination_mapper(None),
+                    owner=owner,
+                    repo=repo,
+                    ref=head_sha,
+                    per_page=100,
+                )
+            )
 
-        checks = self._list_pages(
-            f"/repos/{repository}/commits/{head_sha}/check-runs",
-            "check_runs",
-            {"per_page": 100},
-        )
-        statuses = self._list_pages(
-            f"/repos/{repository}/commits/{head_sha}/statuses",
-            "statuses",
-            {"per_page": 100},
-        )
         latest_check_runs = _latest_by(
             checks,
             key=lambda check: (check.get("name"), _app_id(check.get("app"))),
@@ -219,35 +323,253 @@ class GitHubAppClient:
         body: str,
         head: str,
         base: str,
+        installation_id: int,
     ) -> Mapping[str, object]:
-        result = self._request(
-            "POST",
-            f"/repos/{repository}/pulls",
-            json={"title": title, "body": body, "head": head, "base": base},
-        )
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.pulls.create(
+                owner,
+                repo,
+                data={"title": title, "body": body, "head": head, "base": base},
+            ).json()
         if not isinstance(result, Mapping):
             raise TypeError("GitHub returned an invalid pull request")
         pull_request_id = result.get("id")
         number = result.get("number")
         if not isinstance(pull_request_id, int) or not isinstance(number, int):
             raise TypeError("GitHub pull request response is missing its identity")
-        return {
-            "pull_request_id": str(pull_request_id),
-            "repository": repository.lower(),
-            "number": number,
-            "url": result.get("html_url"),
-        }
+        return _pull_request_summary(
+            result,
+            repository=repository,
+        )
+
+    def get_repository(
+        self,
+        repository: str,
+        installation_id: int,
+        *,
+        timeout: float | None = None,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id, timeout=timeout) as client:
+            result = client.rest.repos.get(owner, repo).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned invalid repository metadata")
+        return result
+
+    def get_ref(
+        self,
+        repository: str,
+        branch: str,
+        installation_id: int,
+        *,
+        timeout: float | None = None,
+    ) -> Mapping[str, object] | None:
+        owner, repo = repository.split("/", 1)
+        try:
+            with self._rest_client(installation_id, timeout=timeout) as client:
+                result = client.rest.git.get_ref(
+                    owner, repo, f"heads/{quote(branch, safe='/')}"
+                ).json()
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
+                return None
+            raise
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git ref")
+        return result
+
+    def get_commit(
+        self,
+        repository: str,
+        sha: str,
+        installation_id: int,
+        *,
+        timeout: float | None = None,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id, timeout=timeout) as client:
+            result = client.rest.git.get_commit(owner, repo, sha).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git commit")
+        return result
+
+    def get_tree(
+        self,
+        repository: str,
+        sha: str,
+        installation_id: int,
+        *,
+        timeout: float | None = None,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id, timeout=timeout) as client:
+            result = client.rest.git.get_tree(owner, repo, sha, recursive="1").json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git tree")
+        return result
+
+    def get_blob(
+        self,
+        repository: str,
+        sha: str,
+        installation_id: int,
+        *,
+        timeout: float | None = None,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id, timeout=timeout) as client:
+            result = client.rest.git.get_blob(owner, repo, sha).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git blob")
+        return result
+
+    def create_blob(
+        self,
+        repository: str,
+        content: str,
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.git.create_blob(
+                owner,
+                repo,
+                data={
+                    "content": base64.b64encode(content.encode("utf-8")).decode(
+                        "ascii"
+                    ),
+                    "encoding": "base64",
+                },
+            ).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git blob")
+        return result
+
+    def create_tree(
+        self,
+        repository: str,
+        base_tree: str,
+        entries: list[Mapping[str, object]],
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.git.create_tree(
+                owner,
+                repo,
+                data={
+                    "base_tree": base_tree,
+                    "tree": [dict(entry) for entry in entries],
+                },
+            ).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git tree")
+        return result
+
+    def create_commit(
+        self,
+        repository: str,
+        message: str,
+        tree: str,
+        parent: str,
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.git.create_commit(
+                owner,
+                repo,
+                data={"message": message, "tree": tree, "parents": [parent]},
+            ).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid Git commit")
+        return result
+
+    def create_ref(
+        self,
+        repository: str,
+        branch: str,
+        sha: str,
+        installation_id: int,
+    ) -> None:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            client.rest.git.create_ref(
+                owner,
+                repo,
+                data={"ref": f"refs/heads/{branch}", "sha": sha},
+            )
+
+    def update_ref(
+        self,
+        repository: str,
+        branch: str,
+        sha: str,
+        installation_id: int,
+    ) -> None:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            client.rest.git.update_ref(
+                owner,
+                repo,
+                f"heads/{quote(branch, safe='/')}",
+                data={"sha": sha, "force": False},
+            )
+
+    def get_pull_request(
+        self,
+        repository: str,
+        number: int,
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.pulls.get(owner, repo, number).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid pull request")
+        return _pull_request_summary(result, repository=repository)
+
+    def find_pull_requests(
+        self,
+        repository: str,
+        branch: str,
+        base: str,
+        installation_id: int,
+    ) -> list[Mapping[str, object]]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            results = list(
+                client.rest.paginate(
+                    client.rest.pulls.list,
+                    map_func=self._pagination_mapper(None),
+                    owner=owner,
+                    repo=repo,
+                    state="all",
+                    head=f"{owner}:{branch}",
+                    base=base,
+                    per_page=100,
+                )
+            )
+        summaries = []
+        for result in results:
+            if not isinstance(result, Mapping):
+                raise TypeError("GitHub returned an invalid pull request")
+            summaries.append(_pull_request_summary(result, repository=repository))
+        return summaries
 
     def verify_pull_request_completion(
         self,
         repository: str,
         pull_request_number: int,
         expected_pull_request_id: str,
+        installation_id: int,
     ) -> Mapping[str, object]:
-        pull_request = self._request(
-            "GET",
-            f"/repos/{repository}/pulls/{pull_request_number}",
-        )
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            pull_request = client.rest.pulls.get(
+                owner, repo, pull_request_number
+            ).json()
         if not isinstance(pull_request, Mapping):
             raise TypeError("GitHub returned an invalid pull request")
         pull_request_id = pull_request.get("id")
@@ -260,7 +582,11 @@ class GitHubAppClient:
         ):
             return {"verified": False}
 
-        ci = self.get_pull_request_ci(repository, pull_request_number)
+        ci = self.get_pull_request_ci(
+            repository,
+            pull_request_number,
+            installation_id,
+        )
         checks = ci.get("ci_checks")
         verified = (
             str(ci.get("pull_request_id")) == expected_pull_request_id
@@ -274,11 +600,39 @@ class GitHubAppClient:
         )
         return {"verified": verified}
 
-    def mark_task_done(self, state: Mapping[str, object]) -> Mapping[str, object]:
+    def mark_task_done(
+        self,
+        state: Mapping[str, object],
+        installation_id: int,
+    ) -> Mapping[str, object]:
         project_id = state.get("project_node_id")
         item_id = state.get("project_item_id")
-        if not isinstance(project_id, str) or not isinstance(item_id, str):
-            raise TypeError("Task is missing its GitHub Project or item node ID")
+        owner = state.get("project_owner")
+        owner_type = state.get("project_owner_type")
+        repository = state.get("target_repository")
+        if (
+            not isinstance(project_id, str)
+            or not isinstance(item_id, str)
+            or not isinstance(owner, str)
+            or owner_type not in {"organization", "user"}
+            or not isinstance(repository, str)
+        ):
+            raise TypeError("Task is missing its GitHub Project identity")
+        resolved = self.get_project_item(item_id, installation_id)
+        issue = resolved.get("issue")
+        if (
+            resolved.get("project_node_id") != project_id
+            or resolved.get("project_owner") != owner
+            or resolved.get("project_owner_type") != owner_type
+            or not isinstance(issue, Mapping)
+            or not isinstance(issue.get("repository"), str)
+            or issue["repository"].casefold() != repository.casefold()
+        ):
+            raise ValueError("Task Project item no longer matches its saved identity")
+        status_field_id = resolved.get("status_field_id")
+        done_option_id = resolved.get("done_option_id")
+        if not isinstance(status_field_id, str) or not isinstance(done_option_id, str):
+            raise TypeError("Project status field or Done option is unavailable")
         result = self._graphql(
             """
             mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
@@ -295,9 +649,10 @@ class GitHubAppClient:
             {
                 "projectId": project_id,
                 "itemId": item_id,
-                "fieldId": self._status_field_id,
-                "optionId": self._done_option_id,
+                "fieldId": status_field_id,
+                "optionId": done_option_id,
             },
+            installation_id=installation_id,
         )
         updated_item = result.get("updateProjectV2ItemFieldValue")
         if not isinstance(updated_item, Mapping) or not isinstance(
@@ -307,120 +662,185 @@ class GitHubAppClient:
         return result
 
     def close(self) -> None:
-        self._client.close()
+        self._github.__exit__()
 
     def _graphql(
         self,
         query: str,
         variables: Mapping[str, object],
+        *,
+        installation_id: int,
     ) -> Mapping[str, object]:
-        response = self._request(
-            "POST",
-            "/graphql",
-            json={"query": query, "variables": dict(variables)},
-        )
+        try:
+            client = self._sdk_client(installation_id)
+            response = client.graphql.request(query, dict(variables))
+        except GraphQLFailed as error:
+            raise RuntimeError(
+                f"GitHub GraphQL operation failed: {error.response.errors}"
+            ) from error
+        except GitHubRequestError as error:
+            raise error.exc from error
         if not isinstance(response, Mapping):
-            raise TypeError("GitHub GraphQL response is invalid")
-        errors = response.get("errors")
-        if errors:
-            raise RuntimeError(f"GitHub GraphQL operation failed: {errors}")
-        data = response.get("data")
-        if not isinstance(data, Mapping):
             raise TypeError("GitHub GraphQL response is missing data")
-        return data
+        return response
 
-    def _list_pages(
-        self,
-        path: str,
-        collection_key: str,
-        params: Mapping[str, object],
-    ) -> list[object]:
-        url: str | None = path
-        page_params: Mapping[str, object] | None = params
-        results: list[object] = []
-        for _ in range(1000):
-            response = self._request_response("GET", url, params=page_params)
-            payload = response.json()
-            items = (
-                payload
-                if isinstance(payload, list)
-                else payload.get(collection_key)
-                if isinstance(payload, Mapping)
-                else None
-            )
-            if not isinstance(items, list):
-                raise TypeError(f"GitHub response is missing {collection_key}")
-            results.extend(items)
-            next_link = response.links.get("next")
-            url = next_link.get("url") if next_link else None
-            if url is not None:
+    @contextmanager
+    def _rest_client(
+        self, installation_id: int, *, timeout: float | None = None
+    ) -> Iterator[GitHub]:
+        try:
+            yield self._sdk_client(installation_id, timeout=timeout)
+        except GitHubRequestError as error:
+            raise error.exc from error
+
+    def _pagination_mapper(self, collection_key: str | None):
+        page_count = 0
+
+        def map_page(response: Any) -> list[object]:
+            nonlocal page_count
+            page_count += 1
+            next_link = response.raw_response.links.get("next")
+            if next_link:
                 origin = urlparse(self._api_url)
-                next_origin = urlparse(url)
+                next_origin = urlparse(next_link["url"])
                 if (next_origin.scheme, next_origin.netloc) != (
                     origin.scheme,
                     origin.netloc,
                 ):
                     raise ValueError("GitHub pagination link changed API host")
-            page_params = None
-            if url is None:
-                return results
-        raise RuntimeError("GitHub pagination exceeded the configured safety limit")
-
-    def _request(
-        self,
-        method: str,
-        path: str,
-        **kwargs: Any,
-    ) -> object:
-        response = self._request_response(method, path, **kwargs)
-        return response.json()
-
-    def _request_response(
-        self,
-        method: str,
-        path: str,
-        **kwargs: Any,
-    ) -> httpx.Response:
-        response = self._client.request(
-            method,
-            path,
-            headers={"Authorization": f"Bearer {self._installation_token()}"},
-            **kwargs,
-        )
-        response.raise_for_status()
-        return response
-
-    def _installation_token(self) -> str:
-        with self._token_lock:
-            if self._token and datetime.now(UTC) < self._token_expires_at:
-                return self._token
-            now = int(time.time())
-            app_jwt = jwt.encode(
-                {"iat": now - 60, "exp": now + 540, "iss": str(self._app_id)},
-                self._private_key,
-                algorithm="RS256",
-            )
-            response = self._client.post(
-                f"/app/installations/{self._installation_id}/access_tokens",
-                headers={"Authorization": f"Bearer {app_jwt}"},
-            )
-            response.raise_for_status()
+                if page_count == 1000:
+                    raise RuntimeError(
+                        "GitHub pagination exceeded the configured safety limit"
+                    )
             payload = response.json()
-            if not isinstance(payload, Mapping):
-                raise TypeError("GitHub installation token response is invalid")
-            token = payload.get("token")
-            expires_at = payload.get("expires_at")
-            if not isinstance(token, str) or not isinstance(expires_at, str):
-                raise TypeError("GitHub installation token response is invalid")
-            self._token = token
-            self._token_expires_at = datetime.fromisoformat(expires_at) - timedelta(
-                seconds=60
+            items = (
+                payload
+                if collection_key is None and isinstance(payload, list)
+                else payload.get(collection_key)
+                if collection_key is not None and isinstance(payload, Mapping)
+                else None
             )
-            return token
+            if not isinstance(items, list):
+                key = collection_key or "items"
+                raise TypeError(f"GitHub response is missing {key}")
+            return items
+
+        return map_page
+
+    def _sdk_client(self, installation_id: int, *, timeout: float | None = None):
+        if isinstance(installation_id, bool) or not isinstance(installation_id, int):
+            raise ValueError("installation_id must be a positive integer")
+        if installation_id <= 0:
+            raise ValueError("installation_id must be a positive integer")
+        auth = self._app_auth.as_installation(installation_id)
+        config = self._github.config
+        if timeout is not None:
+            config = replace(config, timeout=httpx.Timeout(timeout))
+        return GitHub(auth, config=config)
+
+    def _project_status_configuration(
+        self,
+        project: Mapping[str, object],
+    ) -> tuple[str, str, str]:
+        fields = project.get("fields")
+        nodes = fields.get("nodes") if isinstance(fields, Mapping) else None
+        page_info = fields.get("pageInfo") if isinstance(fields, Mapping) else None
+        if (
+            not isinstance(nodes, list)
+            or not isinstance(page_info, Mapping)
+            or page_info.get("hasNextPage") is not False
+        ):
+            raise RuntimeError("GitHub Project fields are incomplete")
+        matches = [
+            field
+            for field in nodes
+            if isinstance(field, Mapping)
+            and field.get("name") == self._status_field_name
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("GitHub Project status field is missing or ambiguous")
+        field_id = matches[0].get("id")
+        options = matches[0].get("options")
+        if (
+            not isinstance(field_id, str)
+            or not field_id
+            or not isinstance(options, list)
+        ):
+            raise RuntimeError("GitHub Project status field is incomplete")
+
+        def option_id(name: str) -> str:
+            matching_options = [
+                option
+                for option in options
+                if isinstance(option, Mapping) and option.get("name") == name
+            ]
+            if len(matching_options) != 1:
+                raise RuntimeError(
+                    f"GitHub Project option {name!r} is missing or ambiguous"
+                )
+            result = matching_options[0].get("id")
+            if not isinstance(result, str) or not result:
+                raise RuntimeError("GitHub Project status option is incomplete")
+            return result
+
+        return (
+            field_id,
+            option_id(self._ready_option_name),
+            option_id(self._done_option_name),
+        )
 
 
 def _app_id(app: object) -> object:
     return app.get("id") if isinstance(app, Mapping) else None
+
+
+def _pull_request_summary(
+    result: Mapping[str, object],
+    *,
+    repository: str,
+) -> Mapping[str, object]:
+    pull_request_id = result.get("id")
+    number = result.get("number")
+    head = result.get("head")
+    base = result.get("base")
+    repository_info = result.get("repository")
+    head_repository = head.get("repo") if isinstance(head, Mapping) else None
+    base_repository = base.get("repo") if isinstance(base, Mapping) else None
+    actual_repository = (
+        repository_info.get("full_name")
+        if isinstance(repository_info, Mapping)
+        else base_repository.get("full_name")
+        if isinstance(base_repository, Mapping)
+        else None
+    )
+    actual_head_repository = (
+        head_repository.get("full_name")
+        if isinstance(head_repository, Mapping)
+        else None
+    )
+    if (
+        not isinstance(pull_request_id, int)
+        or not isinstance(number, int)
+        or not isinstance(actual_repository, str)
+        or not isinstance(actual_head_repository, str)
+        or not isinstance(head, Mapping)
+        or not isinstance(base, Mapping)
+        or not isinstance(head.get("ref"), str)
+        or not isinstance(base.get("ref"), str)
+    ):
+        raise TypeError("GitHub pull request response is missing its identity or refs")
+    if actual_repository.casefold() != repository.casefold():
+        raise TypeError("GitHub pull request response repository did not match")
+    return {
+        "pull_request_id": str(pull_request_id),
+        "repository": actual_repository,
+        "head_repository": actual_head_repository,
+        "number": number,
+        "head": head["ref"],
+        "base": base["ref"],
+        "state": result.get("state"),
+        "url": result.get("html_url"),
+    }
 
 
 def _latest_by(

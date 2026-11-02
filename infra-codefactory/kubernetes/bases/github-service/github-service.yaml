@@ -17,8 +17,6 @@ spec:
         app.kubernetes.io/part-of: codefactory
     spec:
       automountServiceAccountToken: false
-      imagePullSecrets:
-      - name: ghcr-pull-secret
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -26,6 +24,37 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      - name: wait-for-database-migrations
+        image: postgres:16.10-bookworm
+        imagePullPolicy: IfNotPresent
+        command: [ "sh", "-ec" ]
+        args:
+        - |
+          until psql -X -qAt \
+            --host="$GITHUB_DB_HOST" \
+            --port="$GITHUB_DB_PORT" \
+            --username="$GITHUB_DB_USERNAME" \
+            --dbname="$GITHUB_DB_NAME" \
+            --set=ON_ERROR_STOP=1 \
+            --command="SELECT to_regclass('github_service.webhook_deliveries') IS NOT NULL AND to_regclass('github_service.task_contexts') IS NOT NULL AND (SELECT ready FROM codefactory_migrations.migration_state WHERE id = 1)" | grep -qx t; do
+            sleep 2
+          done
+        envFrom:
+        - configMapRef:
+            name: codefactory-database-config
+        env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: GITHUB_DB_PASSWORD
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
       containers:
       - name: github-service
         image: codefactory/github-service:dev
@@ -46,12 +75,19 @@ spec:
         envFrom:
         - configMapRef:
             name: codefactory-service-config
+        - configMapRef:
+            name: codefactory-database-config
         env:
-        - name: GITHUB_DATABASE_URL
+        - name: GITHUB_DB_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-database-config
+              key: GITHUB_DB_USERNAME
+        - name: GITHUB_DB_PASSWORD
           valueFrom:
             secretKeyRef:
               name: codefactory-runtime-secrets
-              key: GITHUB_DATABASE_URL
+              key: GITHUB_DB_PASSWORD
         - name: GITHUB_WEBHOOK_SECRET
           valueFrom:
             secretKeyRef:
@@ -67,31 +103,6 @@ spec:
             configMapKeyRef:
               name: codefactory-github-settings
               key: GITHUB_APP_ID
-        - name: GITHUB_INSTALLATION_ID
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_INSTALLATION_ID
-        - name: GITHUB_PROJECT_NODE_ID
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_NODE_ID
-        - name: GITHUB_PROJECT_STATUS_FIELD_ID
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_STATUS_FIELD_ID
-        - name: GITHUB_PROJECT_READY_OPTION_ID
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_READY_OPTION_ID
-        - name: GITHUB_PROJECT_DONE_OPTION_ID
-          valueFrom:
-            configMapKeyRef:
-              name: codefactory-github-settings
-              key: GITHUB_PROJECT_DONE_OPTION_ID
         - name: GITHUB_PRIVATE_KEY_PATH
           value: /var/run/secrets/github-app/private-key.pem
         volumeMounts:

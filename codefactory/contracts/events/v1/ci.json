@@ -8,7 +8,24 @@
         "event_pull_request_id",
         "ci_checks",
         "ci_complete",
+        "installation_id",
         "webhook_delivery_id"
+    ],
+    "examples": [
+        {
+            "task_id": "PVTI_item",
+            "event_type": "ci",
+            "event_pull_request_id": "9001",
+            "ci_checks": [
+                {
+                    "name": "tests",
+                    "status": "success"
+                }
+            ],
+            "ci_complete": true,
+            "installation_id": 654,
+            "webhook_delivery_id": "delivery-2"
+        }
     ],
     "properties": {
         "task_id": {
@@ -45,6 +62,10 @@
         },
         "ci_complete": {
             "type": "boolean"
+        },
+        "installation_id": {
+            "type": "integer",
+            "minimum": 1
         },
         "webhook_delivery_id": {
             "type": "string"

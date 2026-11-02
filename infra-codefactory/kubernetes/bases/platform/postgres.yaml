@@ -1,0 +1,199 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codefactory-postgres-init
+data:
+  00-create-login-roles.sql: |
+    \getenv github_username GITHUB_DB_USERNAME
+    \getenv github_password GITHUB_DB_PASSWORD
+    \getenv langgraph_username LANGGRAPH_DB_USERNAME
+    \getenv langgraph_password LANGGRAPH_DB_PASSWORD
+
+    SELECT format(
+        'CREATE ROLE %I LOGIN PASSWORD %L',
+        :'github_username',
+        :'github_password'
+    )
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = :'github_username'
+    )
+    \gexec
+
+    SELECT format(
+        'CREATE ROLE %I LOGIN PASSWORD %L',
+        :'langgraph_username',
+        :'langgraph_password'
+    )
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pg_roles WHERE rolname = :'langgraph_username'
+    )
+    \gexec
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: codefactory-postgres
+  labels:
+    app.kubernetes.io/name: codefactory-postgres
+    app.kubernetes.io/part-of: codefactory
+spec:
+  serviceName: codefactory-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: codefactory-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: codefactory-postgres
+        app.kubernetes.io/part-of: codefactory
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: postgres
+        image: postgres:16.10-bookworm
+        imagePullPolicy: IfNotPresent
+        args:
+        - postgres
+        - -c
+        - log_statement=none
+        - -c
+        - log_min_error_statement=panic
+        ports:
+        - name: postgres
+          containerPort: 5432
+          protocol: TCP
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-database-config
+              key: POSTGRES_ADMIN_USERNAME
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: POSTGRES_ADMIN_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-database-config
+              key: GITHUB_DB_NAME
+        - name: POSTGRES_INITDB_ARGS
+          value: --auth-host=scram-sha-256
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: POSTGRES_ADMIN_PASSWORD
+        - name: GITHUB_DB_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-database-config
+              key: GITHUB_DB_USERNAME
+        - name: GITHUB_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: GITHUB_DB_PASSWORD
+        - name: LANGGRAPH_DB_USERNAME
+          valueFrom:
+            configMapKeyRef:
+              name: codefactory-database-config
+              key: LANGGRAPH_DB_USERNAME
+        - name: LANGGRAPH_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: LANGGRAPH_DB_PASSWORD
+        startupProbe:
+          exec:
+            command: [ "pg_isready", "--host=127.0.0.1", "--port=5432" ]
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 30
+        readinessProbe:
+          exec:
+            command: [ "pg_isready", "--host=127.0.0.1", "--port=5432" ]
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command: [ "pg_isready", "--host=127.0.0.1", "--port=5432" ]
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "1"
+            memory: 1Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          runAsGroup: 999
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-run
+          mountPath: /var/run/postgresql
+        - name: postgres-tmp
+          mountPath: /tmp
+        - name: postgres-init
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+      volumes:
+      - name: postgres-run
+        emptyDir:
+          sizeLimit: 16Mi
+      - name: postgres-tmp
+        emptyDir:
+          sizeLimit: 64Mi
+      - name: postgres-init
+        configMap:
+          name: codefactory-postgres-init
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codefactory-postgres
+  labels:
+    app.kubernetes.io/name: codefactory-postgres
+    app.kubernetes.io/part-of: codefactory
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: codefactory-postgres
+  ports:
+  - name: postgres
+    port: 5432
+    targetPort: postgres
+    protocol: TCP

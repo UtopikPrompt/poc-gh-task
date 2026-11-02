@@ -7,6 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml ./pyproject.toml
 COPY src/ ./src/
+COPY migrations/ ./migrations/
 RUN pip install --no-cache-dir --disable-pip-version-check . \
     && groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --create-home --home-dir /home/app --shell /usr/sbin/nologin app

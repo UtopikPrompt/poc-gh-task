@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+/infra-codefactory/kubernetes/environments/dev/secrets/runtime-secrets.env
+/infra-codefactory/kubernetes/environments/dev/secrets/dashboard-oauth.env
+/infra-codefactory/kubernetes/environments/dev/secrets/github-app.env
+/infra-codefactory/kubernetes/environments/dev/secrets/github-app.pem

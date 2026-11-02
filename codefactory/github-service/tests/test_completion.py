@@ -13,9 +13,12 @@ class FakeStore:
     def task_context(self, task_id):
         assert task_id == "task-1"
         return {
+            "project_owner": "example-org",
+            "project_owner_type": "organization",
             "project_node_id": "PVT_project",
             "project_item_id": "PVTI_item",
             "target_repository": "example/project",
+            "installation_id": "654",
         }
 
 
@@ -24,16 +27,19 @@ class FakeGitHub:
         self.verified = verified
         self.marked = []
 
-    def verify_pull_request_completion(self, repository, number, expected_id):
-        assert (repository, number, expected_id) == (
+    def verify_pull_request_completion(
+        self, repository, number, expected_id, installation_id
+    ):
+        assert (repository, number, expected_id, installation_id) == (
             "example/project",
             17,
             "9001",
+            654,
         )
         return {"verified": self.verified}
 
-    def mark_task_done(self, state):
-        self.marked.append(state)
+    def mark_task_done(self, state, installation_id):
+        self.marked.append((state, installation_id))
         return {"updated": True}
 
 
@@ -42,7 +48,6 @@ def test_completion_requires_github_revalidation_before_project_write():
     complete = GitHubTaskCompletion(
         store=FakeStore(),
         github=github,
-        project_node_id="PVT_project",
     )
 
     assert complete("task-1") == {
@@ -57,7 +62,6 @@ def test_completion_updates_only_the_mapped_project_item_after_revalidation():
     complete = GitHubTaskCompletion(
         store=FakeStore(),
         github=github,
-        project_node_id="PVT_project",
     )
 
     assert complete("task-1") == {
@@ -65,5 +69,14 @@ def test_completion_updates_only_the_mapped_project_item_after_revalidation():
         "project_update": {"updated": True},
     }
     assert github.marked == [
-        {"project_node_id": "PVT_project", "project_item_id": "PVTI_item"}
+        (
+            {
+                "project_node_id": "PVT_project",
+                "project_item_id": "PVTI_item",
+                "project_owner": "example-org",
+                "project_owner_type": "organization",
+                "target_repository": "example/project",
+            },
+            654,
+        )
     ]

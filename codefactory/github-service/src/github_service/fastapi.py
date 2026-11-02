@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -11,6 +12,7 @@ from fastapi import FastAPI, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from github_service.settings import RuntimeSettings
+from github_service.publishing import FileChangeProposal
 from github_service.webhook_service import WebhookService
 from github_service.webhooks import (
     WebhookAuthenticationError,
@@ -19,6 +21,8 @@ from github_service.webhooks import (
 
 
 class InternalStore(Protocol):
+    def list_workflows(self) -> list[dict[str, object]]: ...
+
     def claim_event(
         self,
         *,
@@ -45,7 +49,15 @@ class InternalServiceRuntime:
     lease_seconds: int = 60
     max_attempts: int = 8
     complete_task: Callable[[str], dict[str, object]] | None = None
-    publish_pull_request: Callable[..., dict[str, object]] | None = None
+    propose_file_changes: Callable[[FileChangeProposal], dict[str, object]] | None = (
+        None
+    )
+    get_source_tree: Callable[[str], dict[str, object]] | None = None
+    get_source_files: Callable[[str, object], dict[str, object]] | None = None
+
+
+MAX_PROPOSAL_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_SOURCE_REQUEST_BYTES = 8 * 1024
 
 
 class WebhookRuntime:
@@ -136,6 +148,17 @@ def create_http_app(
             raise HTTPException(status_code=401, detail="unauthorized")
         return runtime
 
+    @app.get("/internal/management/workflows")
+    async def list_management_workflows(request: Request) -> dict[str, object]:
+        runtime = internal_runtime(request)
+        try:
+            workflows = await run_in_threadpool(runtime.store.list_workflows)
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="workflow state unavailable"
+            ) from error
+        return {"workflows": workflows}
+
     @app.post("/internal/events/claim")
     async def claim_event(request: Request) -> dict[str, object]:
         runtime = internal_runtime(request)
@@ -187,27 +210,73 @@ def create_http_app(
             )
         return {"retried": True}
 
-    @app.post("/internal/github/publish-pr")
-    async def publish_pull_request(request: Request) -> dict[str, object]:
+    @app.post("/internal/github/propose-changes")
+    async def propose_file_changes(request: Request) -> dict[str, object]:
         runtime = internal_runtime(request)
-        if runtime.publish_pull_request is None:
-            raise HTTPException(status_code=503, detail="PR publication unavailable")
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="invalid request")
+        if runtime.propose_file_changes is None:
+            raise HTTPException(status_code=503, detail="file proposal unavailable")
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > MAX_PROPOSAL_REQUEST_BYTES:
+                    raise HTTPException(
+                        status_code=413, detail="proposal payload too large"
+                    )
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=400, detail="invalid content length"
+                ) from error
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_PROPOSAL_REQUEST_BYTES:
+                raise HTTPException(
+                    status_code=413, detail="proposal payload too large"
+                )
+            body.extend(chunk)
+        try:
+            proposal = FileChangeProposal.from_payload(json.loads(body))
+        except (json.JSONDecodeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        try:
+            return await run_in_threadpool(runtime.propose_file_changes, proposal)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/internal/github/source-tree")
+    async def get_source_tree(request: Request) -> dict[str, object]:
+        runtime = internal_runtime(request)
+        if runtime.get_source_tree is None:
+            raise HTTPException(status_code=503, detail="source context unavailable")
+        payload = await _bounded_json(request, MAX_SOURCE_REQUEST_BYTES)
+        if not isinstance(payload, dict) or set(payload) != {"task_id"}:
+            raise HTTPException(status_code=400, detail="request must contain task_id")
         task_id = payload.get("task_id")
-        fields = {name: payload.get(name) for name in ("title", "body", "head", "base")}
         if not isinstance(task_id, str) or not task_id:
             raise HTTPException(status_code=400, detail="task_id is required")
-        if any(
-            not isinstance(value, str) or not value.strip() for value in fields.values()
-        ):
-            raise HTTPException(status_code=400, detail="PR metadata is incomplete")
-        return await run_in_threadpool(
-            runtime.publish_pull_request,
-            task_id=task_id,
-            **fields,
-        )
+        try:
+            return await run_in_threadpool(runtime.get_source_tree, task_id)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/internal/github/source-files")
+    async def get_source_files(request: Request) -> dict[str, object]:
+        runtime = internal_runtime(request)
+        if runtime.get_source_files is None:
+            raise HTTPException(status_code=503, detail="source context unavailable")
+        payload = await _bounded_json(request, MAX_SOURCE_REQUEST_BYTES)
+        if not isinstance(payload, dict) or set(payload) != {"task_id", "paths"}:
+            raise HTTPException(
+                status_code=400, detail="request must contain task_id and paths"
+            )
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise HTTPException(status_code=400, detail="task_id is required")
+        try:
+            return await run_in_threadpool(
+                runtime.get_source_files, task_id, payload.get("paths")
+            )
+        except (ValueError, TypeError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.post("/internal/github/complete-task")
     async def complete_task(request: Request) -> dict[str, object]:
@@ -221,3 +290,24 @@ def create_http_app(
         return await run_in_threadpool(runtime.complete_task, task_id)
 
     return app
+
+
+async def _bounded_json(request: Request, maximum_bytes: int) -> object:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > maximum_bytes:
+                raise HTTPException(status_code=413, detail="source request too large")
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400, detail="invalid content length"
+            ) from error
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > maximum_bytes:
+            raise HTTPException(status_code=413, detail="source request too large")
+        body.extend(chunk)
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=400, detail="invalid JSON") from error
