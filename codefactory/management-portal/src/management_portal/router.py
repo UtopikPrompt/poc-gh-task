@@ -27,6 +27,7 @@ from management_portal.auth import (
     dashboard_session_login,
     github_organization_member_login,
     install_oauth_callback_query_redaction,
+    oauth_state_cookie_name,
     require_dashboard_auth_configuration,
     sign_dashboard_session,
 )
@@ -236,7 +237,7 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
         response = RedirectResponse(location, status_code=302)
         response.headers["Cache-Control"] = "no-store"
         response.set_cookie(
-            DASHBOARD_STATE_COOKIE,
+            oauth_state_cookie_name(state),
             state,
             max_age=DASHBOARD_STATE_SECONDS,
             httponly=True,
@@ -251,12 +252,15 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
         require_dashboard_auth_configuration(settings)
         query = OAUTH_CALLBACK_QUERY.get() or {}
         state_values = query.get("state", [])
-        cookie_state = request.cookies.get(DASHBOARD_STATE_COOKIE, "")
+        state = state_values[0] if len(state_values) == 1 else ""
+        cookie_state = (
+            request.cookies.get(oauth_state_cookie_name(state), "") if state else ""
+        )
         if (
-            len(state_values) != 1
+            not state
             or not cookie_state
             or not hmac.compare_digest(
-                cookie_state.encode("utf-8"), state_values[0].encode("utf-8")
+                cookie_state.encode("utf-8"), state.encode("utf-8")
             )
         ):
             raise HTTPException(status_code=400, detail="invalid OAuth state")
@@ -265,7 +269,7 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             response = PlainTextResponse(
                 "GitHub authorization was not completed.", status_code=401
             )
-            clear_oauth_state_cookie(response)
+            clear_oauth_state_cookie(response, state)
             return response
 
         code_values = query.get("code", [])
@@ -283,13 +287,13 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
                 "Active membership in the approved GitHub organization is required.",
                 status_code=403,
             )
-            clear_oauth_state_cookie(response)
+            clear_oauth_state_cookie(response, state)
             return response
         except Exception:
             response = PlainTextResponse(
                 "GitHub authorization is temporarily unavailable.", status_code=502
             )
-            clear_oauth_state_cookie(response)
+            clear_oauth_state_cookie(response, state)
             return response
 
         response = RedirectResponse("/", status_code=303)
@@ -307,11 +311,11 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             samesite="lax",
             path="/",
         )
-        clear_oauth_state_cookie(response)
+        clear_oauth_state_cookie(response, state)
         return response
 
     @router.post("/auth/logout")
-    async def dashboard_logout() -> RedirectResponse:
+    async def dashboard_logout(request: Request) -> RedirectResponse:
         response = RedirectResponse("/", status_code=303)
         response.delete_cookie(
             DASHBOARD_SESSION_COOKIE,
@@ -320,7 +324,15 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             httponly=True,
             samesite="lax",
         )
-        clear_oauth_state_cookie(response)
+        for cookie_name in request.cookies:
+            if cookie_name.startswith(f"{DASHBOARD_STATE_COOKIE}_"):
+                response.delete_cookie(
+                    cookie_name,
+                    path="/auth",
+                    secure=True,
+                    httponly=True,
+                    samesite="lax",
+                )
         return response
 
     @router.get("/", response_class=HTMLResponse)

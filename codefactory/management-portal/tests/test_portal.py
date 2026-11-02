@@ -6,6 +6,7 @@ import httpx
 from jsonschema import Draft202012Validator
 from fastapi.testclient import TestClient
 from management_portal.auth import (
+    DASHBOARD_STATE_COOKIE,
     DASHBOARD_SESSION_SECONDS,
     DASHBOARD_STATE_SECONDS,
     GITHUB_ORGANIZATION,
@@ -471,11 +472,41 @@ def test_oauth_state_is_required_and_callback_query_is_redacted(tmp_path):
     assert "sensitive-auth-code" not in invalid_callback.text
     assert "incorrect-state" not in invalid_callback.text
     assert callback_query_strings == [b""]
-    state_cookie = _set_cookie(login_response, "codefactory_dashboard_oauth_state")
+    state_cookie = next(
+        value
+        for value in login_response.headers.get_list("set-cookie")
+        if value.startswith(f"{DASHBOARD_STATE_COOKIE}_")
+    )
     assert f"Max-Age={DASHBOARD_STATE_SECONDS}" in state_cookie
     assert "secure" in state_cookie.lower()
     assert "httponly" in state_cookie.lower()
     assert "samesite=lax" in state_cookie.lower()
+
+
+def test_oauth_state_supports_multiple_in_flight_login_attempts(tmp_path):
+    app = _create_app(tmp_path)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        first_login = client.get("/auth/login", follow_redirects=False)
+        first_state = parse_qs(urlsplit(first_login.headers["location"]).query)[
+            "state"
+        ][0]
+        second_login = client.get("/auth/login", follow_redirects=False)
+        second_state = parse_qs(urlsplit(second_login.headers["location"]).query)[
+            "state"
+        ][0]
+        first_callback = client.get(
+            "/auth",
+            params={"code": "authorization-code", "state": first_state},
+            follow_redirects=False,
+        )
+        second_callback = client.get(
+            "/auth",
+            params={"code": "authorization-code", "state": second_state},
+            follow_redirects=False,
+        )
+
+    assert first_callback.status_code == second_callback.status_code == 303
 
 
 def test_oauth_session_cookie_is_secure_http_only_and_short_lived(tmp_path):

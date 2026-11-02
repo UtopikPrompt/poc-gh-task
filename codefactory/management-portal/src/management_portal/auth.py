@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from contextvars import ContextVar
+import hashlib
 import hmac
 import json
 import time
@@ -27,6 +28,11 @@ SAFE_AUTH_CONFIGURATION_ERROR = "Dashboard authentication is not configured"
 OAUTH_CALLBACK_QUERY: ContextVar[dict[str, list[str]] | None] = ContextVar(
     "oauth_callback_query", default=None
 )
+
+
+def oauth_state_cookie_name(state: str) -> str:
+    state_digest = hashlib.sha256(state.encode("utf-8")).hexdigest()[:16]
+    return f"{DASHBOARD_STATE_COOKIE}_{state_digest}"
 
 
 class OrganizationMembershipDenied(Exception):
@@ -143,9 +149,10 @@ def _dashboard_session_claims(
 
 def clear_oauth_state_cookie(
     response: PlainTextResponse | RedirectResponse,
+    state: str,
 ) -> None:
     response.delete_cookie(
-        DASHBOARD_STATE_COOKIE,
+        oauth_state_cookie_name(state),
         path="/auth",
         secure=True,
         httponly=True,
