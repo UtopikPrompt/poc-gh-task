@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: management-portal
+  labels:
+    app.kubernetes.io/name: management-portal
+    app.kubernetes.io/part-of: codefactory
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: management-portal
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: management-portal
+        app.kubernetes.io/part-of: codefactory
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: management-portal
+        image: codefactory/management-portal:dev
+        imagePullPolicy: Always
+        command:
+        - uvicorn
+        args:
+        - management_portal.host:create_app
+        - --factory
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8000"
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: codefactory-service-config
+        env:
+        - name: INTERNAL_SERVICE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: INTERNAL_SERVICE_TOKEN
+        - name: GITHUB_OAUTH_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: github-dashboard-oauth
+              key: GITHUB_OAUTH_CLIENT_ID
+              optional: true
+        - name: GITHUB_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: github-dashboard-oauth
+              key: GITHUB_OAUTH_CLIENT_SECRET
+              optional: true
+        - name: DASHBOARD_SESSION_SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              name: github-dashboard-oauth
+              key: DASHBOARD_SESSION_SIGNING_KEY
+              optional: true
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: "500m"
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: management-portal
+  labels:
+    app.kubernetes.io/name: management-portal
+    app.kubernetes.io/part-of: codefactory
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: management-portal
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP

@@ -1,0 +1,173 @@
+:root {
+    color-scheme: light;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    background: #f3f6f5;
+    color: #172321;
+}
+
+body {
+    margin: 0;
+}
+
+main {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 32px 24px;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid #cbd6d2;
+    padding-bottom: 18px;
+}
+
+header form {
+    margin: 0;
+}
+
+section {
+    padding: 22px 0;
+    border-bottom: 1px solid #cbd6d2;
+}
+
+h2 {
+    margin: 0 0 16px;
+    font-size: 18px;
+}
+
+h3 {
+    margin: 20px 0 8px;
+    font-size: 15px;
+}
+
+label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.config-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+input {
+    width: 110px;
+    min-height: 36px;
+    box-sizing: border-box;
+    border: 1px solid #91a39d;
+    background: #fff;
+    color: #172321;
+    padding: 6px 8px;
+    font: inherit;
+}
+
+button:disabled,
+input:disabled {
+    cursor: not-allowed;
+    opacity: 0.58;
+}
+
+h1 {
+    font-size: 24px;
+    margin: 0;
+}
+
+button {
+    border: 1px solid #45655d;
+    background: #fff;
+    color: #173c34;
+    padding: 8px 12px;
+    font: inherit;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #e6efec;
+}
+
+#message {
+    color: #53625e;
+    min-height: 24px;
+    margin: 18px 0 8px;
+}
+
+.table-wrap {
+    overflow-x: auto;
+    border-top: 2px solid #256653;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 850px;
+    text-align: left;
+}
+
+th {
+    color: #53625e;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+th,
+td {
+    padding: 12px 10px;
+    border-bottom: 1px solid #d5dedb;
+}
+
+td {
+    font-size: 14px;
+    vertical-align: top;
+}
+
+code {
+    overflow-wrap: anywhere;
+}
+
+.status {
+    font-weight: 650;
+    color: #175947;
+}
+
+.failed {
+    color: #a13d32;
+}
+
+.task-link {
+    border: 0;
+    padding: 0;
+    color: #175947;
+    background: transparent;
+    text-decoration: underline;
+}
+
+ol {
+    padding-left: 22px;
+}
+
+li {
+    padding: 4px 0;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+    main {
+        padding: 22px 14px;
+    }
+
+    header {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    header h1 {
+        flex-basis: 100%;
+    }
+}

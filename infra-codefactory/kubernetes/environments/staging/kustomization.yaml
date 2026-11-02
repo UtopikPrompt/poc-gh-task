@@ -4,6 +4,7 @@ resources:
 - ../../bases/platform
 - ../../bases/github-service
 - ../../bases/langgraph-service
+- ../../bases/management-portal
 patches:
 - path: database-config.yaml
 images:
@@ -12,4 +13,7 @@ images:
   newTag: staging
 - name: codefactory/langgraph-service
   newName: ghcr.io/utopikprompt/poc-gh-task-langgraph-service
+  newTag: staging
+- name: codefactory/management-portal
+  newName: ghcr.io/utopikprompt/poc-gh-task-management-portal
   newTag: staging

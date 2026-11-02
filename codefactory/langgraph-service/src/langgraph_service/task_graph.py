@@ -19,6 +19,7 @@ from langgraph_service.task import Task
 
 class TaskState(TypedDict, total=False):
     task_id: str
+    agent_config: dict[str, object]
     webhook_delivery_id: str
     event_id: str
     task_status: str

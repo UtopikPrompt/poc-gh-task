@@ -5,7 +5,11 @@ import logging
 
 from fastapi.testclient import TestClient
 from github_service.bootstrap import create_app
-from github_service.events import GitHubEventNormalizer, GitHubWebhook, ProjectEventConfig
+from github_service.events import (
+    GitHubEventNormalizer,
+    GitHubWebhook,
+    ProjectEventConfig,
+)
 from github_service.settings import RuntimeSettings
 
 
@@ -285,7 +289,9 @@ def test_normalizer_logs_status_rejection_without_payload_content(caplog):
     )
     caplog.set_level(logging.INFO)
 
-    result = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())(webhook, FakeStore())
+    result = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())(
+        webhook, FakeStore()
+    )
 
     assert result is None
     decision = next(

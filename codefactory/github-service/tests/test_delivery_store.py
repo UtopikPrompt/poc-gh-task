@@ -305,6 +305,69 @@ def test_postgres_concurrent_webhook_delivery_reports_in_progress():
     assert "FOR UPDATE" in statements[1]
 
 
+def test_postgres_workflow_summary_projects_delivery_and_pull_request_status():
+    statements = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, statement, params=()):
+            statements.append(statement)
+
+        def fetchall(self):
+            return [
+                {
+                    "task_id": "task-1",
+                    "event_type": "merged",
+                    "created_at": "2026-11-02 12:00:00+00:00",
+                    "state": "processed",
+                    "attempts": 2,
+                    "has_failure": False,
+                    "repository": "example/project",
+                    "pull_request_number": 47,
+                    "pull_request_id": "PR_node_id",
+                    "delivery_id": "delivery-3",
+                    "delivery_status": "accepted",
+                    "ci_payload": {
+                        "ci_checks": [{"name": "tests", "status": "success"}],
+                        "ci_complete": True,
+                    },
+                    "pull_request_merged": True,
+                }
+            ]
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    store = PostgresDeliveryStore("postgresql://test", connection_factory=Connection)
+
+    workflows = store.list_workflows()
+
+    assert workflows[0]["delivery_status"] == "accepted"
+    assert workflows[0]["status"] == "processed"
+    assert workflows[0]["pull_request_merged"] is True
+    assert workflows[0]["ci_status"] == "success"
+    assert workflows[0]["ci_complete"] is True
+    query = statements[0]
+    assert "LEFT JOIN github_service.webhook_deliveries delivery" in query
+    assert "LEFT JOIN latest_ci ci" in query
+    assert "merged.payload->>'merged' = 'true'" in query
+
+
 @pytest.mark.parametrize("stored_installation_id", [654, 987])
 def test_postgres_task_context_never_changes_installation(stored_installation_id):
     statements = []

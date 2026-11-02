@@ -7,6 +7,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 
+from langgraph_service.agent_config import AgentConfig
 from langgraph_service.github_client import GitHubServiceClient
 from langgraph_service.local_model import LocalLlamaCppProposalProvider
 from langgraph_service.operations import WorkflowOperations
@@ -122,7 +123,9 @@ def make_operations(
         issue = _bounded_issue(state.get("issue"))
         candidates = github_client.candidate_source_paths(task_id)
         candidate_paths = _validate_candidates(candidates)
-        selection = proposal_provider.complete(
+        selection = _complete(
+            proposal_provider,
+            state,
             prompt=_prompt(
                 "Select only source paths needed to understand and implement the task.",
                 {"issue": issue, "candidate_paths": candidate_paths},
@@ -150,7 +153,9 @@ def make_operations(
 
     def create_plan(state: Mapping[str, object]) -> Mapping[str, object]:
         context = _required_mapping(state, "context")
-        plan = proposal_provider.complete(
+        plan = _complete(
+            proposal_provider,
+            state,
             prompt=_prompt(
                 "Create a concise machine-readable implementation plan and validation plan.",
                 {"context": context},
@@ -162,7 +167,9 @@ def make_operations(
         return plan
 
     def assess_risk(state: Mapping[str, object]) -> Mapping[str, object]:
-        risk = proposal_provider.complete(
+        risk = _complete(
+            proposal_provider,
+            state,
             prompt=_prompt(
                 "Summarize plausible impact and uncertainty for human review. This is advisory only; do not make a gate or approval decision.",
                 {
@@ -232,7 +239,9 @@ def _prepare_changes(
             "Repair the task proposal using the recorded CI failures and the same task context. "
             "Do not infer success or change merge authorization."
         )
-    proposal = provider.complete(
+    proposal = _complete(
+        provider,
+        state,
         prompt=_prompt(instruction, data),
         response_schema=_CHANGE_SCHEMA,
         max_tokens=4096,
@@ -249,6 +258,30 @@ def _prepare_changes(
     if not isinstance(summary, str) or not isinstance(risk_summary, str):
         raise ValueError("task plan or risk summary is invalid")
     return {"changes": changes, "summary": summary, "risk_summary": risk_summary}
+
+
+def _complete(
+    provider: LocalLlamaCppProposalProvider,
+    state: Mapping[str, object],
+    *,
+    prompt: str,
+    response_schema: Mapping[str, object],
+    max_tokens: int,
+) -> dict[str, object]:
+    raw_config = state.get("agent_config")
+    if raw_config is None:
+        return provider.complete(
+            prompt=prompt,
+            response_schema=response_schema,
+            max_tokens=max_tokens,
+        )
+    config = AgentConfig.model_validate(raw_config)
+    return provider.complete(
+        prompt=prompt,
+        response_schema=response_schema,
+        max_tokens=max_tokens,
+        timeout_seconds=config.completion_timeout_seconds,
+    )
 
 
 def _prompt(instruction: str, data: Mapping[str, object]) -> str:

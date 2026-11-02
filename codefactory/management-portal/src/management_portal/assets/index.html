@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codefactory workflow state</title>
+    <link rel="stylesheet" href="/management-portal/assets/portal.css">
+    <script src="/management-portal/assets/portal.js" defer></script>
+</head>
+
+<body>
+    <main>
+        <header>
+            <h1>Codefactory workflow state</h1>
+            <form action="/auth/logout" method="post"><button type="submit">Sign out</button></form>
+            <button id="refresh" type="button">Refresh</button>
+        </header>
+        <section aria-labelledby="agent-config-heading">
+            <h2 id="agent-config-heading">Agent configuration</h2>
+            <form id="agent-config-form">
+                <label for="completion-timeout">Local model timeout (seconds)</label>
+                <div class="config-controls">
+                    <input id="completion-timeout" name="completion_timeout_seconds" type="number" min="1" max="90"
+                        step="1" required>
+                    <button id="save-config" type="submit" disabled>Save configuration</button>
+                </div>
+            </form>
+            <p id="config-message" role="status" aria-live="polite">Loading configuration...</p>
+            <p id="config-audit"></p>
+        </section>
+        <section aria-labelledby="execution-heading">
+            <h2 id="execution-heading">LangGraph executions</h2>
+            <p id="execution-message" role="status" aria-live="polite">Loading executions...</p>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Task</th>
+                            <th>Workflow status</th>
+                            <th>Waiting for</th>
+                            <th>Updated</th>
+                            <th>Step</th>
+                        </tr>
+                    </thead>
+                    <tbody id="executions"></tbody>
+                </table>
+            </div>
+            <div id="execution-detail" aria-live="polite"></div>
+        </section>
+        <section aria-labelledby="workflow-heading">
+            <h2 id="workflow-heading">GitHub event state</h2>
+            <p id="message" role="status" aria-live="polite">Loading workflow state...</p>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Task</th>
+                            <th>Repository</th>
+                            <th>Issue</th>
+                            <th>Pull request</th>
+                            <th>Latest event</th>
+                            <th>Status</th>
+                            <th>Updated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="workflows"></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+</body>
+
+</html>

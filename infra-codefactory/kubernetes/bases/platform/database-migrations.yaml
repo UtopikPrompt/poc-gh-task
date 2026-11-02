@@ -44,7 +44,7 @@ spec:
         imagePullPolicy: Always
         command: [ "sh", "-ec" ]
         args:
-        - cp /app/migrations/001_checkpoint_schema.sql /migrations/001_checkpoint_schema.sql
+        - cp /app/migrations/001_checkpoint_schema.sql /migrations/001_checkpoint_schema.sql && cp /app/migrations/002_agent_config.sql /migrations/002_agent_config.sql
         volumeMounts:
         - name: migrations
           mountPath: /migrations

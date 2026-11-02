@@ -1,0 +1,480 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Codefactory Management Portal",
+        "version": "1.0.0",
+        "description": "Authenticated workflow inspection and owner-only non-secret agent configuration management. The portal calls GitHub and LangGraph service APIs and has no database access."
+    },
+    "paths": {
+        "/healthz": {
+            "get": {
+                "operationId": "healthz",
+                "responses": {
+                    "200": {
+                        "description": "Service health"
+                    }
+                }
+            }
+        },
+        "/auth/login": {
+            "get": {
+                "operationId": "startGitHubOAuth",
+                "responses": {
+                    "302": {
+                        "description": "Redirect to GitHub authorization"
+                    },
+                    "503": {
+                        "description": "OAuth configuration unavailable"
+                    }
+                }
+            }
+        },
+        "/auth/callback": {
+            "get": {
+                "operationId": "completeGitHubOAuth",
+                "responses": {
+                    "303": {
+                        "description": "Authenticated portal session created"
+                    },
+                    "400": {
+                        "description": "Invalid OAuth state or response"
+                    },
+                    "403": {
+                        "description": "Active organization membership required"
+                    },
+                    "502": {
+                        "description": "GitHub identity or role verification failed"
+                    }
+                }
+            }
+        },
+        "/auth/logout": {
+            "post": {
+                "operationId": "logout",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "303": {
+                        "description": "Portal session cleared"
+                    }
+                }
+            }
+        },
+        "/": {
+            "get": {
+                "operationId": "workflowDashboard",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Management portal page"
+                    },
+                    "303": {
+                        "description": "Redirect to authentication"
+                    },
+                    "503": {
+                        "description": "OAuth configuration unavailable"
+                    }
+                }
+            }
+        },
+        "/api/workflows": {
+            "get": {
+                "operationId": "listWorkflows",
+                "description": "Returns allowlisted workflow summaries from GitHub Service; issue content, event payloads, and failure details are never returned.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe workflow summaries",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "github-service.json#/components/schemas/WorkflowList"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/agent-config": {
+            "get": {
+                "operationId": "getAgentConfig",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Effective non-secret agent configuration and audit metadata",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PortalAgentConfig"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            },
+            "put": {
+                "operationId": "updateAgentConfig",
+                "description": "Only a signed session with a verified GitHub Organization Owner role may update configuration. Changes apply to new workflow runs.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AgentConfig"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Configuration saved with an incremented version",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AgentConfigRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified GitHub Organization Owner role required"
+                    },
+                    "422": {
+                        "description": "Configuration failed validation"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/executions": {
+            "get": {
+                "operationId": "listLangGraphExecutions",
+                "description": "Lists safe summaries from LangGraph checkpoints. Raw checkpoint blobs and issue/source content are omitted.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Execution summaries",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExecutionList"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/executions/{thread_id}": {
+            "get": {
+                "operationId": "getLangGraphExecution",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "thread_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe checkpoint history projection",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ExecutionDetail"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "description": "Execution not found"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "portalSession": {
+                "type": "apiKey",
+                "in": "cookie",
+                "name": "codefactory_dashboard_session",
+                "description": "Short-lived signed session issued only after active organization membership is verified; the owner claim is set only after GitHub confirms the explicit Organization Owner role."
+            }
+        },
+        "responses": {
+            "Unauthorized": {
+                "description": "Valid authenticated portal session required"
+            },
+            "Unavailable": {
+                "description": "Authentication or upstream service unavailable"
+            }
+        },
+        "schemas": {
+            "AgentConfig": {
+                "type": "object",
+                "required": [
+                    "completion_timeout_seconds"
+                ],
+                "properties": {
+                    "completion_timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 90,
+                        "default": 45,
+                        "description": "Existing local-model request timeout; applies to new workflow runs."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AgentConfigRecord": {
+                "type": "object",
+                "required": [
+                    "config",
+                    "version",
+                    "updated_at",
+                    "updated_by"
+                ],
+                "properties": {
+                    "config": {
+                        "$ref": "#/components/schemas/AgentConfig"
+                    },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "updated_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "PortalAgentConfig": {
+                "type": "object",
+                "required": [
+                    "config",
+                    "version",
+                    "updated_at",
+                    "updated_by",
+                    "can_edit"
+                ],
+                "properties": {
+                    "config": {
+                        "$ref": "#/components/schemas/AgentConfig"
+                    },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "updated_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "can_edit": {
+                        "type": "boolean",
+                        "description": "True only for a session with a verified GitHub Organization Owner role."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ExecutionSummary": {
+                "type": "object",
+                "required": [
+                    "thread_id",
+                    "checkpoint_id",
+                    "created_at",
+                    "step",
+                    "workflow_status",
+                    "waiting_for",
+                    "task_status",
+                    "event_type",
+                    "event_status"
+                ],
+                "properties": {
+                    "thread_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    },
+                    "checkpoint_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 200
+                    },
+                    "created_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time",
+                        "maxLength": 40
+                    },
+                    "step": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "workflow_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "waiting_for": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "task_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "event_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    },
+                    "event_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ExecutionList": {
+                "type": "object",
+                "required": [
+                    "executions"
+                ],
+                "properties": {
+                    "executions": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "$ref": "#/components/schemas/ExecutionSummary"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ExecutionDetail": {
+                "type": "object",
+                "required": [
+                    "thread_id",
+                    "checkpoints"
+                ],
+                "properties": {
+                    "thread_id": {
+                        "type": "string",
+                        "maxLength": 200
+                    },
+                    "checkpoints": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {
+                            "$ref": "#/components/schemas/ExecutionSummary"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            }
+        }
+    }
+}

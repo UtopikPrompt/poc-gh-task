@@ -3,7 +3,7 @@
     "info": {
         "title": "Codefactory GitHub Service",
         "version": "1.0.0",
-        "description": "Signed webhook intake and bearer-authenticated internal GitHub capabilities."
+        "description": "Signed webhook intake and bearer-authenticated internal GitHub capabilities, including safe workflow summaries for the management portal."
     },
     "paths": {
         "/healthz": {
@@ -19,6 +19,38 @@
                                 }
                             }
                         }
+                    }
+                }
+            }
+        },
+        "/internal/management/workflows": {
+            "get": {
+                "tags": [
+                    "internal"
+                ],
+                "operationId": "listManagementWorkflows",
+                "description": "Returns allowlisted workflow summaries for the management portal. Issue content, event payloads, and failure details are omitted.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe workflow summaries",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WorkflowList"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
                     }
                 }
             }
@@ -524,6 +556,132 @@
             }
         },
         "schemas": {
+            "WorkflowList": {
+                "type": "object",
+                "required": [
+                    "workflows"
+                ],
+                "properties": {
+                    "workflows": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/components/schemas/WorkflowSummary"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "WorkflowSummary": {
+                "type": "object",
+                "required": [
+                    "task_id",
+                    "issue_number",
+                    "repository",
+                    "pull_request_number",
+                    "pull_request_id",
+                    "latest_event",
+                    "latest_event_at",
+                    "delivery_id",
+                    "delivery_status",
+                    "status",
+                    "attempts",
+                    "has_failure",
+                    "pull_request_merged",
+                    "ci_status",
+                    "ci_complete"
+                ],
+                "properties": {
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "issue_number": {
+                        "type": "null",
+                        "description": "Issue numbers are not persisted by the current workflow summary store."
+                    },
+                    "repository": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "pull_request_number": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 1
+                    },
+                    "pull_request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "latest_event": {
+                        "enum": [
+                            "ready",
+                            "ci",
+                            "merged"
+                        ]
+                    },
+                    "latest_event_at": {
+                        "type": "string"
+                    },
+                    "delivery_id": {
+                        "type": "string"
+                    },
+                    "delivery_status": {
+                        "enum": [
+                            "processing",
+                            "accepted",
+                            "failed",
+                            "unavailable"
+                        ],
+                        "description": "Webhook-delivery processing state; distinct from the task-event queue status."
+                    },
+                    "status": {
+                        "enum": [
+                            "queued",
+                            "processing",
+                            "processed",
+                            "failed",
+                            "unavailable"
+                        ],
+                        "description": "Processing state of the latest normalized task event."
+                    },
+                    "attempts": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "has_failure": {
+                        "type": "boolean"
+                    },
+                    "pull_request_merged": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ],
+                        "description": "True only after a merged event is recorded; null means merge status has not been observed, not that the PR is open."
+                    },
+                    "ci_status": {
+                        "enum": [
+                            "unknown",
+                            "success",
+                            "pending",
+                            "failure"
+                        ],
+                        "description": "Aggregate of the latest persisted CI event for the task."
+                    },
+                    "ci_complete": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ],
+                        "description": "Completion value from the latest persisted CI event; null means no CI event is available."
+                    }
+                },
+                "additionalProperties": false
+            },
             "Health": {
                 "type": "object",
                 "required": [
@@ -853,7 +1011,7 @@
                 }
             },
             "Unauthorized": {
-                "description": "Signature or bearer authentication failed",
+                "description": "Signature, bearer, or dashboard-session authentication failed",
                 "content": {
                     "application/json": {
                         "schema": {

@@ -1,13 +1,20 @@
 import asyncio
+from contextlib import asynccontextmanager, nullcontext
+from datetime import datetime, timezone
 import json
 import sys
 from types import ModuleType
 
+from fastapi.testclient import TestClient
+from langgraph.checkpoint.memory import InMemorySaver
 import pytest
 from langgraph_service import migrate
+from langgraph_service.agent_config import AgentConfig
+from langgraph_service.config_store import AgentConfigSnapshot
 from langgraph_service.database import postgres_url_from_environment
 from langgraph_service import host
 from langgraph_service.operations import WorkflowOperations
+from langgraph_service.service import LangGraphTaskService
 from langgraph_service.workflow_operations import make_operations
 from sqlalchemy.engine import make_url
 
@@ -145,3 +152,95 @@ def test_langgraph_readiness_exposes_local_model_unavailability(monkeypatch):
         "status": "unavailable",
         "dependency": "local_model",
     }
+
+
+def test_private_management_api_is_authenticated_and_projects_safe_state(monkeypatch):
+    _configure(monkeypatch, "unused_worker_module")
+    monkeypatch.delenv("WORKFLOW_OPERATIONS_MODULE")
+
+    class ConfigStore:
+        current = AgentConfigSnapshot(AgentConfig(), 0, None, None)
+
+        def __init__(self, _database_url):
+            pass
+
+        def get(self):
+            return self.current
+
+        def update(self, config, *, updated_by):
+            self.current = AgentConfigSnapshot(
+                config,
+                self.current.version + 1,
+                datetime.now(timezone.utc),
+                updated_by,
+            )
+            return self.current
+
+    class FakeSaver:
+        @classmethod
+        def from_conn_string(cls, _database_url):
+            return nullcontext(InMemorySaver())
+
+    monkeypatch.setattr(host, "PostgresAgentConfigStore", ConfigStore)
+    app = host.create_app()
+
+    @asynccontextmanager
+    async def no_lifespan(_app):
+        yield
+
+    app.router.lifespan_context = no_lifespan
+    with LangGraphTaskService(
+        database_url="postgresql://test",
+        operations=WorkflowOperations(),
+        postgres_saver_factory=FakeSaver,
+    ) as lifecycle:
+        lifecycle.invoke(
+            {
+                "task_id": "task-safe",
+                "event_type": "unknown",
+                "issue": {"body": "private-issue-payload-marker"},
+                "context": {"files": [{"content": "private-source-payload-marker"}]},
+            }
+        )
+        app.state.task_lifecycle = lifecycle
+        with TestClient(app) as client:
+            assert client.get("/internal/management/agent-config").status_code == 401
+            headers = {"Authorization": "Bearer service-token"}
+            initial = client.get("/internal/management/agent-config", headers=headers)
+            updated = client.put(
+                "/internal/management/agent-config",
+                headers=headers,
+                json={"completion_timeout_seconds": 60, "updated_by": "owner-login"},
+            )
+            invalid = client.put(
+                "/internal/management/agent-config",
+                headers=headers,
+                json={
+                    "completion_timeout_seconds": 60,
+                    "updated_by": "owner-login",
+                    "api_token": "secret-marker",
+                },
+            )
+            listing = client.get("/internal/management/executions", headers=headers)
+            detail = client.get(
+                "/internal/management/executions/task-safe", headers=headers
+            )
+
+    assert initial.status_code == 200
+    assert initial.json() == {
+        "config": {"completion_timeout_seconds": 45},
+        "version": 0,
+        "updated_at": None,
+        "updated_by": None,
+    }
+    assert updated.status_code == 200
+    assert updated.json()["config"] == {"completion_timeout_seconds": 60}
+    assert updated.json()["version"] == 1
+    assert updated.json()["updated_by"] == "owner-login"
+    assert invalid.status_code == 422
+    assert listing.status_code == detail.status_code == 200
+    assert listing.json()["executions"][0]["thread_id"] == "task-safe"
+    assert detail.json()["thread_id"] == "task-safe"
+    assert "private-issue-payload-marker" not in listing.text + detail.text
+    assert "private-source-payload-marker" not in listing.text + detail.text
+    assert "secret-marker" not in updated.text

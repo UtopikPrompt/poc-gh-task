@@ -45,6 +45,7 @@ class LocalLlamaCppProposalProvider:
         prompt: str,
         response_schema: Mapping[str, object],
         max_tokens: int,
+        timeout_seconds: int | None = None,
     ) -> dict[str, object]:
         if not isinstance(prompt, str) or not prompt:
             raise ValueError("model prompt must be non-empty text")
@@ -52,6 +53,8 @@ class LocalLlamaCppProposalProvider:
             raise ValueError("model prompt exceeds the byte limit")
         if not 1 <= max_tokens <= MAX_COMPLETION_TOKENS:
             raise ValueError("model completion token limit is invalid")
+        if timeout_seconds is not None and not 1 <= timeout_seconds <= 90:
+            raise ValueError("local model timeout must be between 1 and 90 seconds")
         request_payload = {
             "prompt": prompt,
             "temperature": 0,
@@ -62,8 +65,13 @@ class LocalLlamaCppProposalProvider:
             "cache_prompt": False,
             "json_schema": dict(response_schema),
         }
+        request_options = (
+            {"timeout": httpx.Timeout(timeout_seconds, connect=min(5, timeout_seconds))}
+            if timeout_seconds is not None
+            else {}
+        )
         with self._client.stream(
-            "POST", "/completion", json=request_payload
+            "POST", "/completion", json=request_payload, **request_options
         ) as response:
             response.raise_for_status()
             body = bytearray()

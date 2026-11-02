@@ -5,6 +5,7 @@ resources:
 - ../../bases/platform
 - ../../bases/github-service
 - ../../bases/langgraph-service
+- ../../bases/management-portal
 - github-webhook-ingress.yaml
 - storage.yaml
 patches:
@@ -17,4 +18,7 @@ images:
   newTag: dev
 - name: codefactory/langgraph-service
   newName: ghcr.io/utopikprompt/poc-gh-task-langgraph-service
+  newTag: dev
+- name: codefactory/management-portal
+  newName: ghcr.io/utopikprompt/poc-gh-task-management-portal
   newTag: dev

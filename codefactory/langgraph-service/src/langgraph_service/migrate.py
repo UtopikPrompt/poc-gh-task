@@ -16,6 +16,7 @@ MIGRATION_FILES = (
     "001_github_event_queue.sql",
     "001_checkpoint_schema.sql",
     "002_service_roles.sql",
+    "002_agent_config.sql",
     "003_github_task_installation.sql",
     "004_github_project_identity.sql",
 )

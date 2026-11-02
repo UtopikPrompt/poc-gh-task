@@ -1,7 +1,8 @@
 # Codefactory Services
 
-This Kustomize unit deploys the GitHub webhook service and LangGraph worker as
-separate workloads in the `codefactory` namespace. Render it locally with:
+This Kustomize unit deploys the GitHub webhook service, LangGraph worker, and
+management portal as separate workloads in the `codefactory` namespace. Render
+it locally with:
 
 ```sh
 kubectl kustomize infra-codefactory/kubernetes/environments/dev
@@ -12,13 +13,15 @@ Optionally build the images locally from their service-local contexts:
 ```sh
 docker build -t codefactory/github-service:dev codefactory/github-service
 docker build -t codefactory/langgraph-service:dev codefactory/langgraph-service
+docker build -t codefactory/management-portal:dev codefactory/management-portal
 ```
 
-The overlays use `ghcr.io/utopikprompt/poc-gh-task-github-service` and
-`ghcr.io/utopikprompt/poc-gh-task-langgraph-service`, tagged `dev`, `staging`, or
-`prod` according to the selected environment. GitHub Actions builds both images
-without pushing on pull requests. A push to `main` runs validation first, then
-publishes both images to GHCR with the full commit SHA and `dev` tags. The SHA
+The overlays use the `poc-gh-task-github-service`,
+`poc-gh-task-langgraph-service`, and `poc-gh-task-management-portal` GHCR images,
+tagged `dev`, `staging`, or `prod` according to the selected environment.
+GitHub Actions builds all three images without pushing on pull requests. A push
+to `main` runs validation first, then publishes all three images to GHCR with
+the full commit SHA and `dev` tags. The SHA
 tags are not overwritten on workflow reruns; the channel tags point to the
 selected commit. The workflow uses the repository-provided `GITHUB_TOKEN` and
 does not need Docker, credentials, or a PAT on the developer's host. Local
@@ -404,12 +407,11 @@ proxy, or port-forward, fails the check. These mock results validate preflight
 ordering only; they do not prove cluster access, storage provisioning, image
 availability, or deployment readiness.
 
-## Webhook Ingress Prerequisite
+## Ingress
 
-Ingress and HTTPS termination are platform/environment responsibilities, not
-external application services. No Ingress is included because a public
-hostname, TLS secret/certificate policy, and Ingress class/controller were not
-provided. Before enabling GitHub delivery, configure the platform-owned Ingress
-to route `POST /webhooks/github` to Service `github-service` on port 8000, then
-set the matching HTTPS webhook URL in the GitHub App. The service itself stays
-ClusterIP-only.
+The dev overlay includes an Ingress rule routing `/` and portal authentication
+and API paths to Service `management-portal` on port 8000, while the exact
+`/webhooks/github` path routes to Service `github-service` on port 8000. Both
+services remain ClusterIP-only. Ingress class/controller, public hostname, and
+HTTPS termination policy remain platform responsibilities. Configure the
+matching HTTPS webhook URL in the GitHub App before enabling delivery.

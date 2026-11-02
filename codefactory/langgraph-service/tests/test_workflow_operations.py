@@ -248,6 +248,36 @@ def test_model_cannot_select_paths_outside_github_candidate_tree():
     assert requests[0].url.path == "/internal/github/source-tree"
 
 
+def test_agent_timeout_override_reaches_existing_model_completion_call():
+    class TimeoutProvider:
+        def __init__(self):
+            self.timeout_seconds = None
+
+        def complete(
+            self, *, prompt, response_schema, max_tokens, timeout_seconds=None
+        ):
+            self.timeout_seconds = timeout_seconds
+            return {
+                "summary": "Implement the task.",
+                "steps": ["Update the task."],
+                "validation": ["Run tests."],
+                "assumptions": [],
+            }
+
+    provider = TimeoutProvider()
+    operations = make_operations(github_client=object(), proposal_provider=provider)
+
+    result = operations.create_plan(
+        {
+            "agent_config": {"completion_timeout_seconds": 75},
+            "context": {"files": []},
+        }
+    )
+
+    assert result["summary"] == "Implement the task."
+    assert provider.timeout_seconds == 75
+
+
 def test_secret_like_issue_content_fails_before_github_or_model_requests():
     requests = []
     client = GitHubServiceClient(

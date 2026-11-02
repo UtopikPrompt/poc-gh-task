@@ -18,6 +18,11 @@ DeliveryClaim = Literal["claimed", "duplicate", "in_progress"]
 
 def _workflow_summary(row: Any) -> dict[str, object]:
     state = str(row["state"])
+    ci_payload = row["ci_payload"]
+    if isinstance(ci_payload, str):
+        ci_payload = json.loads(ci_payload)
+    ci_status, ci_complete = _ci_summary(ci_payload)
+    delivery_status = row["delivery_status"]
     return {
         "task_id": str(row["task_id"]),
         "issue_number": None,
@@ -30,6 +35,12 @@ def _workflow_summary(row: Any) -> dict[str, object]:
         "pull_request_id": row["pull_request_id"],
         "latest_event": str(row["event_type"]),
         "latest_event_at": str(row["created_at"]),
+        "delivery_id": str(row["delivery_id"]),
+        "delivery_status": (
+            delivery_status
+            if delivery_status in {"processing", "accepted", "failed"}
+            else "unavailable"
+        ),
         "status": {
             "pending": "queued",
             "processing": "processing",
@@ -38,7 +49,30 @@ def _workflow_summary(row: Any) -> dict[str, object]:
         }.get(state, "unavailable"),
         "attempts": int(row["attempts"]),
         "has_failure": bool(row["has_failure"]),
+        "pull_request_merged": True if row["pull_request_merged"] else None,
+        "ci_status": ci_status,
+        "ci_complete": ci_complete,
     }
+
+
+def _ci_summary(payload: object) -> tuple[str, bool | None]:
+    if not isinstance(payload, Mapping):
+        return "unknown", None
+    checks = payload.get("ci_checks")
+    if not isinstance(checks, list):
+        return "unknown", None
+    statuses = [
+        check.get("status")
+        for check in checks
+        if isinstance(check, Mapping) and isinstance(check.get("status"), str)
+    ]
+    complete_value = payload.get("ci_complete")
+    complete = complete_value if isinstance(complete_value, bool) else None
+    if "failure" in statuses:
+        return "failure", complete
+    if complete is True:
+        return "success", complete
+    return "pending", complete
 
 
 def _ready_task_context(event: Mapping[str, object]) -> dict[str, object] | None:
@@ -523,19 +557,34 @@ class SQLiteDeliveryStore:
         with self._lock:
             rows = self._connection.execute(
                 "WITH latest AS ("
-                " SELECT i.task_id, i.event_type, i.created_at, i.ordinal, "
+                " SELECT i.task_id, i.delivery_id, i.event_type, i.created_at, i.ordinal, "
                 " o.state, o.attempts, (o.last_error IS NOT NULL) AS has_failure, "
                 " ROW_NUMBER() OVER (PARTITION BY i.task_id "
                 " ORDER BY i.created_at DESC, i.ordinal DESC) AS position "
                 " FROM task_event_inbox i "
                 " JOIN task_event_outbox o USING (event_id)"
+                "), latest_ci AS ("
+                " SELECT i.task_id, i.payload_json, "
+                " ROW_NUMBER() OVER (PARTITION BY i.task_id "
+                " ORDER BY i.created_at DESC, i.ordinal DESC) AS position "
+                " FROM task_event_inbox i WHERE i.event_type = 'ci'"
                 ") SELECT latest.task_id, latest.event_type, latest.created_at, "
                 " latest.state, latest.attempts, latest.has_failure, "
                 " COALESCE(context.target_repository, pr.repository) AS repository, "
-                " pr.pull_request_number, pr.pull_request_id "
+                " pr.pull_request_number, pr.pull_request_id, latest.delivery_id, "
+                " delivery.state AS delivery_status, ci.payload_json AS ci_payload, "
+                " EXISTS (SELECT 1 FROM task_event_inbox merged "
+                " WHERE merged.task_id = latest.task_id "
+                " AND merged.event_type = 'merged' "
+                " AND json_extract(merged.payload_json, '$.merged') = 1) "
+                " AS pull_request_merged "
                 " FROM latest "
                 " LEFT JOIN task_contexts context USING (task_id) "
                 " LEFT JOIN pull_request_tasks pr USING (task_id) "
+                " LEFT JOIN webhook_deliveries delivery "
+                " ON delivery.delivery_id = latest.delivery_id "
+                " LEFT JOIN latest_ci ci ON ci.task_id = latest.task_id "
+                " AND ci.position = 1 "
                 " WHERE latest.position = 1 "
                 " ORDER BY latest.created_at DESC, latest.ordinal DESC"
             ).fetchall()
@@ -916,19 +965,33 @@ class PostgresDeliveryStore:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "WITH latest AS ("
-                " SELECT i.task_id, i.event_type, i.created_at, i.ordinal, "
+                " SELECT i.task_id, i.delivery_id, i.event_type, i.created_at, i.ordinal, "
                 " o.state, o.attempts, (o.last_error IS NOT NULL) AS has_failure, "
                 " ROW_NUMBER() OVER (PARTITION BY i.task_id "
                 " ORDER BY i.created_at DESC, i.ordinal DESC) AS position "
                 " FROM github_service.task_event_inbox i "
                 " JOIN github_service.task_event_outbox o USING (event_id)"
+                "), latest_ci AS ("
+                " SELECT i.task_id, i.payload AS payload_json, "
+                " ROW_NUMBER() OVER (PARTITION BY i.task_id "
+                " ORDER BY i.created_at DESC, i.ordinal DESC) AS position "
+                " FROM github_service.task_event_inbox i WHERE i.event_type = 'ci'"
                 ") SELECT latest.task_id, latest.event_type, latest.created_at, "
                 " latest.state, latest.attempts, latest.has_failure, "
                 " COALESCE(context.target_repository, pr.repository) AS repository, "
-                " pr.pull_request_number, pr.pull_request_id "
+                " pr.pull_request_number, pr.pull_request_id, latest.delivery_id, "
+                " delivery.state AS delivery_status, ci.payload_json AS ci_payload, "
+                " EXISTS (SELECT 1 FROM github_service.task_event_inbox merged "
+                " WHERE merged.task_id = latest.task_id "
+                " AND merged.event_type = 'merged' "
+                " AND merged.payload->>'merged' = 'true') AS pull_request_merged "
                 " FROM latest "
                 " LEFT JOIN github_service.task_contexts context USING (task_id) "
                 " LEFT JOIN github_service.pull_request_tasks pr USING (task_id) "
+                " LEFT JOIN github_service.webhook_deliveries delivery "
+                " ON delivery.delivery_id = latest.delivery_id "
+                " LEFT JOIN latest_ci ci ON ci.task_id = latest.task_id "
+                " AND ci.position = 1 "
                 " WHERE latest.position = 1 "
                 " ORDER BY latest.created_at DESC, latest.ordinal DESC"
             )

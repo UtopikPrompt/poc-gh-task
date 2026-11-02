@@ -1,8 +1,10 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import jwt
 import pytest
+from jsonschema import Draft202012Validator
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from githubkit._httpx import httpx
@@ -12,6 +14,7 @@ from github_service.events import (
     ProjectEventConfig,
 )
 from github_service.github_app import GitHubAppClient
+from github_service.webhook_service import WebhookService
 
 
 def _client(tmp_path, transport):
@@ -33,6 +36,51 @@ def _client(tmp_path, transport):
         transport=transport,
     )
     return client, public_key
+
+
+def _assert_event_matches_contract(event):
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / f"contracts/events/v1/{event['event_type']}.json"
+    )
+    schema = json.loads(schema_path.read_text())
+    Draft202012Validator(schema).validate(event)
+
+
+def _normalize_and_validate_queued_event(webhook, api):
+    class FakeStore:
+        def __init__(self):
+            self.events = []
+
+        def claim_delivery(self, _delivery_id):
+            return "claimed"
+
+        def complete_delivery(self, _delivery_id, _response):
+            return None
+
+        def fail_delivery(self, _delivery_id):
+            return None
+
+        def enqueue_events(self, _delivery_id, events):
+            self.events = list(events)
+            return [f"event-{index}" for index, _event in enumerate(events, 1)]
+
+        def task_for_pull_request(self, _repository, _pull_request_number):
+            return "PVTI_item"
+
+        def task_context(self, _task_id):
+            return {"installation_id": str(webhook.installation_id)}
+
+    store = FakeStore()
+    normalizer = GitHubEventNormalizer(api, ProjectEventConfig())
+    response = WebhookService(store=store, normalize_event=normalizer).handle(webhook)
+
+    assert response["status"] == "queued"
+    assert len(store.events) == 1
+    event = store.events[0]
+    assert event["webhook_delivery_id"] == webhook.delivery_id
+    _assert_event_matches_contract(event)
+    return event
 
 
 def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
@@ -372,6 +420,64 @@ def test_project_node_id_is_derived_from_resolved_webhook_item():
     assert event["project_owner"] == "example-org"
     assert event["project_owner_type"] == "organization"
     assert event["installation_id"] == 654
+    ready_schema = json.loads(
+        (
+            Path(__file__).resolve().parents[2] / "contracts/events/v1/ready.json"
+        ).read_text()
+    )
+    Draft202012Validator(ready_schema).validate(
+        {**event, "webhook_delivery_id": "delivery-1"}
+    )
+
+
+def test_ci_event_is_validated_against_contract_before_enqueue():
+    class FakeAPI:
+        def get_pull_request_ci(self, repository, pull_request_number, installation_id):
+            assert repository == "org/repo"
+            assert pull_request_number == 17
+            assert installation_id == 654
+            return {
+                "pull_request_id": "9001",
+                "ci_checks": [{"name": "required", "status": "success"}],
+                "ci_complete": True,
+            }
+
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="check_run",
+            delivery_id="ci-delivery-1",
+            installation_id=654,
+            payload={
+                "action": "completed",
+                "repository": {"full_name": "org/repo"},
+                "check_run": {"pull_requests": [{"number": 17}]},
+            },
+        ),
+        FakeAPI(),
+    )
+
+    assert event["event_type"] == "ci"
+    assert event["ci_complete"] is True
+
+
+def test_merged_event_is_validated_against_contract_before_enqueue():
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request",
+            delivery_id="merged-delivery-1",
+            installation_id=654,
+            payload={
+                "action": "closed",
+                "repository": {"full_name": "org/repo"},
+                "number": 17,
+                "pull_request": {"id": 9001, "merged": True},
+            },
+        ),
+        object(),
+    )
+
+    assert event["event_type"] == "merged"
+    assert event["merged"] is True
 
 
 def test_project_event_cannot_switch_an_existing_tasks_installation():

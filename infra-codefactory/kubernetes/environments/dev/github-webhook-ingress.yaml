@@ -12,38 +12,10 @@ spec:
     http:
       paths:
       - path: /
-        pathType: Exact
+        pathType: Prefix
         backend:
           service:
-            name: github-service
-            port:
-              number: 8000
-      - path: /api/workflows
-        pathType: Exact
-        backend:
-          service:
-            name: github-service
-            port:
-              number: 8000
-      - path: /auth/login
-        pathType: Exact
-        backend:
-          service:
-            name: github-service
-            port:
-              number: 8000
-      - path: /auth/callback
-        pathType: Exact
-        backend:
-          service:
-            name: github-service
-            port:
-              number: 8000
-      - path: /auth/logout
-        pathType: Exact
-        backend:
-          service:
-            name: github-service
+            name: management-portal
             port:
               number: 8000
       - path: /webhooks/github

@@ -13,6 +13,23 @@
         "installation_id",
         "webhook_delivery_id"
     ],
+    "examples": [
+        {
+            "task_id": "PVTI_item",
+            "task_status": "ready",
+            "event_type": "ready",
+            "target_repositories": [
+                "example/project"
+            ],
+            "issue": {
+                "repository": "example/project"
+            },
+            "project_node_id": "PVT_project",
+            "project_item_id": "PVTI_item",
+            "installation_id": 654,
+            "webhook_delivery_id": "delivery-1"
+        }
+    ],
     "properties": {
         "task_id": {
             "type": "string"

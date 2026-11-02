@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8,<10", "ruff>=0.8,<1"]
+test = ["pytest>=8,<10", "ruff>=0.8,<1", "jsonschema>=4.22,<5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -14,7 +14,6 @@ class RuntimeSettings:
     github_webhook_secret: str
     database_path: Path
     github_database_url: str | None = field(default=None, repr=False)
-    github_service_url: str = "http://github-service:8000"
     internal_service_token: str = ""
     max_webhook_bytes: int = 1_000_000
     worker_poll_seconds: float = 1.0
@@ -23,9 +22,6 @@ class RuntimeSettings:
     github_app_id: int | None = None
     github_private_key_path: Path | None = None
     github_api_url: str = "https://api.github.com"
-    github_oauth_client_id: str | None = None
-    github_oauth_client_secret: str | None = field(default=None, repr=False)
-    dashboard_session_signing_key: str | None = field(default=None, repr=False)
     project_status_field_name: str = "Status"
     project_ready_option_name: str = "Ready"
     project_done_option_name: str = "Done"
@@ -52,9 +48,6 @@ class RuntimeSettings:
             github_webhook_secret=secret,
             database_path=database_path,
             github_database_url=postgres_url_from_environment("GITHUB", required=False),
-            github_service_url=os.environ.get(
-                "GITHUB_SERVICE_URL", "http://github-service:8000"
-            ),
             internal_service_token=os.environ.get("INTERNAL_SERVICE_TOKEN", ""),
             max_webhook_bytes=max_webhook_bytes,
             worker_poll_seconds=worker_poll_seconds,
@@ -63,11 +56,6 @@ class RuntimeSettings:
             github_app_id=_optional_int("GITHUB_APP_ID"),
             github_private_key_path=_optional_path("GITHUB_PRIVATE_KEY_PATH"),
             github_api_url=os.environ.get("GITHUB_API_URL", "https://api.github.com"),
-            github_oauth_client_id=os.environ.get("GITHUB_OAUTH_CLIENT_ID"),
-            github_oauth_client_secret=os.environ.get("GITHUB_OAUTH_CLIENT_SECRET"),
-            dashboard_session_signing_key=os.environ.get(
-                "DASHBOARD_SESSION_SIGNING_KEY"
-            ),
             project_status_field_name=os.environ.get(
                 "GITHUB_PROJECT_STATUS_FIELD_NAME", "Status"
             ),
