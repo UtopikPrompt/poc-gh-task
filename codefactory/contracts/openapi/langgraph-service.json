@@ -3,7 +3,7 @@
     "info": {
         "title": "Codefactory LangGraph Service",
         "version": "1.0.0",
-        "description": "Private bearer-authenticated management APIs expose only validated non-secret agent configuration and allowlisted workflow checkpoint projections. Raw checkpoint blobs and issue/source payloads are never returned."
+        "description": "Private bearer-authenticated management APIs expose validated agent configuration, revisioned declarative agent rosters, and allowlisted workflow checkpoint projections. Raw checkpoint blobs and issue/source payloads are never returned."
     },
     "paths": {
         "/healthz": {
@@ -148,6 +148,381 @@
                 }
             }
         },
+        "/internal/management/inference-instances": {
+            "get": {
+                "operationId": "getInferenceInstances",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Audited GPU and CPU model selections",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InferenceInstances"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "503": {
+                        "description": "Inference configuration unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/inference-instances/{instance_id}": {
+            "put": {
+                "operationId": "updateInferenceInstance",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "instance_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "gpu",
+                                "cpu"
+                            ]
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/InferenceInstanceUpdate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Instance model selection saved"
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "404": {
+                        "description": "Inference instance not found"
+                    },
+                    "422": {
+                        "description": "Model filename was rejected"
+                    },
+                    "503": {
+                        "description": "Inference configuration unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/inference-instances/{instance_id}/model-downloads": {
+            "post": {
+                "operationId": "requestInferenceModelDownload",
+                "description": "Owner identity is supplied by the authenticated management portal. Enqueues a validated Hugging Face artifact; this API never downloads synchronously.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "instance_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "gpu",
+                                "cpu"
+                            ]
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ModelDownloadRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "202": {
+                        "description": "Durable download request queued",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ModelDownloadRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "409": {
+                        "description": "A download or rollout is active for this instance"
+                    },
+                    "422": {
+                        "description": "URL, SHA-256, or model filename was rejected"
+                    },
+                    "503": {
+                        "description": "Durable download queue unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/inference-model-downloads/{request_id}": {
+            "get": {
+                "operationId": "getInferenceModelDownload",
+                "description": "Returns durable status and fixed public error text. The submitted URL and SHA-256 are never included in status responses.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Download request state",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ModelDownloadRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "404": {
+                        "description": "Download request not found"
+                    },
+                    "503": {
+                        "description": "Download status unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/reconciler/inference-model-rollouts/claim": {
+            "post": {
+                "operationId": "claimInferenceModelRollout",
+                "description": "Claims one current, version-matching rollout event with a renewable-by-reclaim lease. Uses the dedicated MODEL_RECONCILER_TOKEN, not the management service token.",
+                "security": [
+                    {
+                        "reconcilerBearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ModelRolloutClaimRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Claimed event or no work",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ModelRolloutClaimResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Reconciler authentication required"
+                    },
+                    "503": {
+                        "description": "Rollout queue unavailable or reconciler token is not configured"
+                    }
+                }
+            }
+        },
+        "/internal/reconciler/inference-model-rollouts/{event_id}/ack": {
+            "post": {
+                "operationId": "acknowledgeInferenceModelRollout",
+                "description": "Acknowledges success or failure for the active lease. Failure details are intentionally not accepted or persisted; same-token retries are idempotent.",
+                "security": [
+                    {
+                        "reconcilerBearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "event_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ModelRolloutAcknowledgeRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Durable terminal event state",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ModelRolloutAcknowledgeResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Reconciler authentication required"
+                    },
+                    "404": {
+                        "description": "Rollout event not found"
+                    },
+                    "409": {
+                        "description": "Lease is stale, expired, or already acknowledged differently"
+                    },
+                    "422": {
+                        "description": "Acknowledgment failed validation"
+                    },
+                    "503": {
+                        "description": "Rollout status unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/inference-metrics": {
+            "get": {
+                "operationId": "getInferenceMetrics",
+                "description": "Reads Prometheus-compatible CPU, RAM, NVIDIA GPU utilization, and VRAM samples. Missing and stale data are explicitly labeled.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Per-instance metrics, including unavailable fields",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InferenceMetrics"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    }
+                }
+            }
+        },
+        "/internal/management/agent-roster": {
+            "get": {
+                "operationId": "getAgentRoster",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Active roster and revision metadata",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AgentRosterRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "503": {
+                        "description": "Roster store unavailable"
+                    }
+                }
+            },
+            "put": {
+                "operationId": "updateAgentRoster",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AgentRosterUpdate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Validated roster revision saved",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AgentRosterRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "409": {
+                        "description": "Expected roster revision is stale"
+                    },
+                    "422": {
+                        "description": "Roster failed validation"
+                    },
+                    "503": {
+                        "description": "Roster store unavailable"
+                    }
+                }
+            }
+        },
         "/internal/management/executions": {
             "get": {
                 "operationId": "listExecutions",
@@ -230,6 +605,58 @@
                     }
                 }
             }
+        },
+        "/internal/management/executions/{thread_id}/resolve-no-ci": {
+            "post": {
+                "operationId": "resolveExecutionWithoutCI",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "thread_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/NoCIResolutionRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Audited no-CI decision recorded"
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "404": {
+                        "description": "Execution not found"
+                    },
+                    "409": {
+                        "description": "Execution has no unresolved no-CI state"
+                    },
+                    "422": {
+                        "description": "Decision request failed validation"
+                    },
+                    "503": {
+                        "description": "Execution store unavailable"
+                    }
+                }
+            }
         }
     },
     "components": {
@@ -237,6 +664,11 @@
             "bearerAuth": {
                 "type": "http",
                 "scheme": "bearer"
+            },
+            "reconcilerBearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "Dedicated MODEL_RECONCILER_TOKEN shared only with the separately deployed model reconciler."
             }
         },
         "schemas": {
@@ -277,6 +709,481 @@
                 },
                 "additionalProperties": false
             },
+            "InferenceInstanceUpdate": {
+                "type": "object",
+                "required": [
+                    "instance_id",
+                    "model_filename",
+                    "updated_by"
+                ],
+                "properties": {
+                    "instance_id": {
+                        "type": "string",
+                        "enum": [
+                            "gpu",
+                            "cpu"
+                        ]
+                    },
+                    "model_filename": {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 205,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$"
+                    },
+                    "updated_by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceInstanceRecord": {
+                "type": "object",
+                "required": [
+                    "config",
+                    "version",
+                    "updated_at",
+                    "updated_by"
+                ],
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "required": [
+                            "instance_id",
+                            "model_filename",
+                            "model_url",
+                            "model_sha256",
+                            "download_status",
+                            "download_request_id",
+                            "download_error",
+                            "rollout_status",
+                            "rollout_request_id",
+                            "rollout_error"
+                        ],
+                        "properties": {
+                            "instance_id": {
+                                "type": "string",
+                                "enum": [
+                                    "gpu",
+                                    "cpu"
+                                ]
+                            },
+                            "model_filename": {
+                                "$ref": "#/components/schemas/InferenceInstanceUpdate/properties/model_filename"
+                            },
+                            "model_url": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 4096
+                            },
+                            "model_sha256": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "pattern": "^[A-Fa-f0-9]{64}$"
+                            },
+                            "download_status": {
+                                "$ref": "#/components/schemas/DownloadStatus"
+                            },
+                            "download_request_id": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "format": "uuid"
+                            },
+                            "download_error": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 200
+                            },
+                            "rollout_status": {
+                                "$ref": "#/components/schemas/RolloutStatus"
+                            },
+                            "rollout_request_id": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "format": "uuid"
+                            },
+                            "rollout_error": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 200
+                            }
+                        },
+                        "additionalProperties": false
+                    },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "updated_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceInstances": {
+                "type": "object",
+                "required": [
+                    "instances"
+                ],
+                "properties": {
+                    "instances": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": {
+                            "$ref": "#/components/schemas/InferenceInstanceRecord"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "DownloadStatus": {
+                "type": "string",
+                "enum": [
+                    "queued",
+                    "downloading",
+                    "verifying",
+                    "ready",
+                    "failed"
+                ]
+            },
+            "RolloutStatus": {
+                "type": "string",
+                "enum": [
+                    "not_requested",
+                    "waiting_for_download",
+                    "pending",
+                    "rolling_out",
+                    "ready",
+                    "failed"
+                ]
+            },
+            "ModelRolloutClaimRequest": {
+                "type": "object",
+                "properties": {
+                    "lease_seconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 900,
+                        "default": 120
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelRolloutEvent": {
+                "type": "object",
+                "required": [
+                    "event_id",
+                    "instance_id",
+                    "download_request_id",
+                    "model_filename",
+                    "config_version",
+                    "idempotency_key",
+                    "lease_token",
+                    "lease_until",
+                    "attempts"
+                ],
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "instance_id": {
+                        "type": "string",
+                        "enum": [
+                            "gpu",
+                            "cpu"
+                        ]
+                    },
+                    "download_request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "model_filename": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$"
+                    },
+                    "config_version": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "idempotency_key": {
+                        "type": "string"
+                    },
+                    "lease_token": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "lease_until": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "attempts": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelRolloutClaimResponse": {
+                "type": "object",
+                "required": [
+                    "event"
+                ],
+                "properties": {
+                    "event": {
+                        "oneOf": [
+                            {
+                                "$ref": "#/components/schemas/ModelRolloutEvent"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelRolloutAcknowledgeRequest": {
+                "type": "object",
+                "required": [
+                    "lease_token",
+                    "outcome"
+                ],
+                "properties": {
+                    "lease_token": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "succeeded",
+                            "failed"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelRolloutAcknowledgeResponse": {
+                "type": "object",
+                "required": [
+                    "event_id",
+                    "status"
+                ],
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "succeeded",
+                            "failed",
+                            "superseded"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelDownloadRequest": {
+                "type": "object",
+                "required": [
+                    "model_filename",
+                    "model_url",
+                    "model_sha256",
+                    "requested_by"
+                ],
+                "properties": {
+                    "model_filename": {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 205,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$",
+                        "description": "Owner-selected safe artifact basename from model metadata; never derived from redirect headers."
+                    },
+                    "model_url": {
+                        "type": "string",
+                        "format": "uri",
+                        "maxLength": 4096,
+                        "pattern": "^https://huggingface\\.co/",
+                        "description": "Credential-free HTTPS URL on exactly huggingface.co; SHA-256 is mandatory. The worker validates redirects and public DNS destinations."
+                    },
+                    "model_sha256": {
+                        "type": "string",
+                        "pattern": "^[A-Fa-f0-9]{64}$"
+                    },
+                    "requested_by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39,
+                        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelDownloadRecord": {
+                "type": "object",
+                "required": [
+                    "request_id",
+                    "instance_id",
+                    "model_filename",
+                    "requested_by",
+                    "status",
+                    "public_error",
+                    "attempts",
+                    "created_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "instance_id": {
+                        "type": "string",
+                        "enum": [
+                            "gpu",
+                            "cpu"
+                        ]
+                    },
+                    "model_filename": {
+                        "type": "string"
+                    },
+                    "requested_by": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/DownloadStatus"
+                    },
+                    "public_error": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 200
+                    },
+                    "attempts": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "updated_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "MetricValue": {
+                "type": "object",
+                "required": [
+                    "value",
+                    "status"
+                ],
+                "properties": {
+                    "value": {
+                        "type": [
+                            "number",
+                            "null"
+                        ]
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "available",
+                            "stale",
+                            "unavailable"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceMetrics": {
+                "type": "object",
+                "required": [
+                    "instances"
+                ],
+                "properties": {
+                    "instances": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "instance_id",
+                                "cpu_utilization_percent",
+                                "ram_used_bytes",
+                                "gpu_utilization_percent",
+                                "vram_used_bytes",
+                                "vram_total_bytes",
+                                "sampled_at"
+                            ],
+                            "properties": {
+                                "instance_id": {
+                                    "type": "string",
+                                    "enum": [
+                                        "gpu",
+                                        "cpu"
+                                    ]
+                                },
+                                "cpu_utilization_percent": {
+                                    "$ref": "#/components/schemas/MetricValue"
+                                },
+                                "ram_used_bytes": {
+                                    "$ref": "#/components/schemas/MetricValue"
+                                },
+                                "gpu_utilization_percent": {
+                                    "$ref": "#/components/schemas/MetricValue"
+                                },
+                                "vram_used_bytes": {
+                                    "$ref": "#/components/schemas/MetricValue"
+                                },
+                                "vram_total_bytes": {
+                                    "$ref": "#/components/schemas/MetricValue"
+                                },
+                                "sampled_at": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "format": "date-time"
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
             "AgentConfigRecord": {
                 "type": "object",
                 "required": [
@@ -309,13 +1216,221 @@
                 },
                 "additionalProperties": false
             },
+            "AgentProfile": {
+                "type": "object",
+                "required": [
+                    "agent_id",
+                    "name",
+                    "description",
+                    "model_profile",
+                    "tool_profile"
+                ],
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                    },
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 100
+                    },
+                    "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                    },
+                    "prompt_content": {
+                        "type": "string",
+                        "maxLength": 4000,
+                        "default": ""
+                    },
+                    "model_profile": {
+                        "const": "local_llama_cpp"
+                    },
+                    "skill_ids": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "uniqueItems": true,
+                        "items": {
+                            "type": "string",
+                            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                        },
+                        "default": []
+                    },
+                    "tool_profile": {
+                        "enum": [
+                            "gather_context",
+                            "create_plan",
+                            "assess_risk",
+                            "prepare_changes",
+                            "repair_changes"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AgentRoster": {
+                "type": "object",
+                "required": [
+                    "agents",
+                    "assignments"
+                ],
+                "properties": {
+                    "agents": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {
+                            "$ref": "#/components/schemas/AgentProfile"
+                        }
+                    },
+                    "assignments": {
+                        "type": "object",
+                        "required": [
+                            "context",
+                            "planning",
+                            "risk",
+                            "implementation",
+                            "repair"
+                        ],
+                        "propertyNames": {
+                            "enum": [
+                                "context",
+                                "planning",
+                                "risk",
+                                "implementation",
+                                "repair"
+                            ]
+                        },
+                        "additionalProperties": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AgentRosterUpdate": {
+                "type": "object",
+                "required": [
+                    "roster",
+                    "expected_revision",
+                    "updated_by"
+                ],
+                "properties": {
+                    "roster": {
+                        "$ref": "#/components/schemas/AgentRoster"
+                    },
+                    "expected_revision": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39,
+                        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AgentRosterRecord": {
+                "type": "object",
+                "required": [
+                    "roster",
+                    "revision",
+                    "updated_at",
+                    "updated_by"
+                ],
+                "properties": {
+                    "roster": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/AgentRoster"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
+                    },
+                    "revision": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "updated_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "NoCIResolutionRequest": {
+                "type": "object",
+                "required": [
+                    "actor",
+                    "decision"
+                ],
+                "properties": {
+                    "actor": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39,
+                        "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"
+                    },
+                    "decision": {
+                        "const": "proceed_without_ci"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "NoCIResolutionAudit": {
+                "type": "object",
+                "required": [
+                    "actor",
+                    "decided_at",
+                    "decision",
+                    "pull_request_id"
+                ],
+                "properties": {
+                    "actor": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39
+                    },
+                    "decided_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "maxLength": 40
+                    },
+                    "decision": {
+                        "const": "proceed_without_ci"
+                    },
+                    "pull_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    }
+                },
+                "additionalProperties": false
+            },
             "ExecutionSummary": {
                 "type": "object",
                 "required": [
                     "thread_id",
                     "checkpoint_id",
                     "created_at",
-                    "step"
+                    "step",
+                    "next_nodes",
+                    "no_ci_resolution"
                 ],
                 "properties": {
                     "thread_id": {
@@ -340,6 +1455,31 @@
                             "integer",
                             "null"
                         ]
+                    },
+                    "next_nodes": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "dispatch",
+                                "validate_task",
+                                "context",
+                                "plan",
+                                "risk",
+                                "change",
+                                "publish_pr",
+                                "await_ci",
+                                "record_ci",
+                                "record_review",
+                                "record_human_feedback_reply",
+                                "repair",
+                                "human_merge_boundary",
+                                "record_merge",
+                                "record_completion",
+                                "record_no_ci_resolution"
+                            ]
+                        }
                     },
                     "workflow_status": {
                         "type": [
@@ -375,6 +1515,16 @@
                             "null"
                         ],
                         "maxLength": 160
+                    },
+                    "no_ci_resolution": {
+                        "oneOf": [
+                            {
+                                "$ref": "#/components/schemas/NoCIResolutionAudit"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
                     }
                 },
                 "additionalProperties": false

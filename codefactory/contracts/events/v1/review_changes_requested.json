@@ -1,0 +1,99 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Pull request changes requested event",
+    "type": "object",
+    "required": [
+        "task_id",
+        "event_type",
+        "event_pull_request_id",
+        "review_feedback",
+        "installation_id",
+        "webhook_delivery_id"
+    ],
+    "examples": [
+        {
+            "task_id": "PVTI_item",
+            "event_type": "review_changes_requested",
+            "event_pull_request_id": "9001",
+            "review_feedback": "Inline comment on README.md:4:\nPlease revert this unrelated change.",
+            "installation_id": 654,
+            "webhook_delivery_id": "delivery-3"
+        }
+    ],
+    "properties": {
+        "task_id": {
+            "type": "string",
+            "minLength": 1
+        },
+        "event_type": {
+            "const": "review_changes_requested"
+        },
+        "event_pull_request_id": {
+            "type": "string",
+            "minLength": 1
+        },
+        "review_feedback": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768
+        },
+        "review_comment_ids": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*$"
+            }
+        },
+        "inline_review_contexts": {
+            "type": "object",
+            "maxProperties": 20,
+            "propertyNames": {
+                "pattern": "^[1-9][0-9]*$"
+            },
+            "additionalProperties": {
+                "type": "object",
+                "required": [
+                    "path",
+                    "line",
+                    "diff_hunk"
+                ],
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 240
+                    },
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1
+                    },
+                    "side": {
+                        "enum": [
+                            "LEFT",
+                            "RIGHT"
+                        ]
+                    },
+                    "diff_hunk": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 16384
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "installation_id": {
+            "type": "integer",
+            "minimum": 1
+        },
+        "webhook_delivery_id": {
+            "type": "string",
+            "minLength": 1
+        }
+    },
+    "additionalProperties": true
+}

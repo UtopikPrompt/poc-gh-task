@@ -131,7 +131,7 @@ The platform can be reasoned about as four layers:
 A simplified task flow is:
 GitHub-native CI runs configured checks only in response to the relevant GitHub events; LangGraph does not launch those commands. All PR CI checks must report success before merge; unavailable, pending, errored, or failed checks block merge.
 
-Phase 1 target: human sets task to configured start status (default `Ready`) -> LangGraph selects bounded source context and creates a typed proposal with the internal local model -> GitHub Service applies it to the task branch and opens/reuses its PR -> GitHub-native CI reports required checks -> human validates by merging -> successful merge sets task to `Done`.
+Phase 1 target: human sets task to configured start status (default `Ready`) -> GitHub Service revalidates the task and reports `In Progress` -> LangGraph selects bounded source context and creates a typed proposal with the internal local model -> GitHub Service applies it to the task branch and opens/reuses its PR -> GitHub-native CI reports required checks -> human validates by merging -> successful merge sets task to `Done`.
 
 Phase 2 rework loop: human comments `/agent <prompt>` -> workflow updates the same PR branch -> GitHub-native CI reruns -> human reviews again; repeat as needed, then merge only after required checks succeed.
 
@@ -171,12 +171,14 @@ flowchart TD
    end
 
    Human -->|Set task ready| Project
+   Project -->|Report accepted execution| InProgress["Set Project task to in progress"]
    Project -->|Project webhook| Webhook
    GitHub -->|Check and merge webhooks| Webhook
    Webhook --> Normalize
    Normalize --> InboxOutbox
    InboxOutbox --> EventLedger
    EventLedger -->|Authenticated task-event interface| Consume
+   Consume -->|Authenticated start-task capability| InProgress
    Consume --> Workflow
    Workflow <--> Checkpoints
    Workflow --> RequestOperations
@@ -195,11 +197,14 @@ flowchart TD
    Revalidate -->|Confirmed merge and successful checks| Complete
    Revalidate -->|Merge or checks not confirmed| CompletionPending
    Complete -->|Update task status| Project
+   InProgress --> Project
 ```
 
 ### 4.1 Intake and normalization
 
 - A human moves the GitHub Project task to the configured start status (default `Ready`); that transition triggers workflow intake. GitHub-native CI is a separate PR validation step, not the intake trigger.
+- After the worker claims a ready task, the GitHub Service revalidates its saved Project identity and moves the open, non-archived task to the configured `In Progress` option before LangGraph execution. A replay already in `In Progress` is idempotent; stale or changed task state is rejected. The status field must include the configured option (default `In Progress`).
+- A verified organization owner can retry a task whose latest durable event is dead from the management portal. This requeues that exact event, preserves its task identity and payload, and resets its attempt budget; it does not expose stored error text or create a duplicate task.
 - Parse issue text, acceptance criteria, labels, and repository hints.
 - Determine scope, risk, and requested outcome.
 - Identify all repository-defined PR checks and how their results are reported; missing or unavailable results must not be treated as success.
@@ -395,9 +400,11 @@ All three Kubernetes overlays bundle the same internal PostgreSQL StatefulSet wi
 
 The `codefactory-database-migrations` Job copies the SQL migration files from their owning service images, applies them idempotently, and invokes LangGraph checkpoint setup with the LangGraph login. Both Deployments wait for the migration-created tables before starting. Checkpoint setup therefore does not run during application startup. Recreate the completed Job before applying a release that introduces migrations. Database host, port, database, usernames, and `sslmode=disable` are shared internal defaults; only passwords are Secret values. SQLite remains available through the local `create_app` factory and tests only. No cluster or database changes are part of repository validation.
 
+The authenticated LangGraph management API owns the active specialized-agent roster at `/internal/management/agent-roster`. Organization owners manage it from the portal's Configuration page, which proxies reads and writes server-side and never exposes the internal service token to the browser; updates require same-origin HTTPS and use the currently observed `expected_revision` to reject stale edits. Local preview can view the live roster but is read-only. Task intake remains blocked until a valid roster is configured. The roster assigns one profile to each existing context, planning, risk, implementation, and repair stage. The only supported model profile is the existing local llama.cpp provider, and each allowlisted tool profile is the matching fixed stage operation; roster data cannot register tools or executable code. Prompt content is bounded declarative text. Skill IDs are retained as metadata and are not loaded or executed. At first `ready`, the service resolves the active assignments and writes the revision plus selected profile contents to an immutable task snapshot and the LangGraph checkpoint. Later events, including duplicate `ready` deliveries and resumed work, reuse that task snapshot rather than reading a newer roster revision.
+
 The LangGraph-to-GitHub API is bearer-authenticated. Its bounded capabilities are queue claim/ack/retry, typed file-change proposals, and task completion. GitHub Service alone derives repository and Project context from GitHub-owned records, applies proposals to its deterministic task branch, and creates or reuses the verified PR. LangGraph cannot choose repository/base/head/PR identity, call the GitHub App directly, merge, write branches, or run shell/process commands. The GitHub service re-fetches the matching PR and current check/status results after a merge webhook and writes `done` only when the PR is closed and merged and all returned checks are successful. GitHub branch/ruleset configuration remains responsible for blocking human merge until every repository-required check succeeds; configure and verify that separately.
 
-SQLite and mocked-connection tests validate local behavior and PostgreSQL claim SQL, not a live PostgreSQL server. Operators provide the PostgreSQL admin and service passwords, webhook secret, internal token, GitHub App private key and App ID. Optional Project status field and option-name overrides configure matching, not Project identity. The installation ID comes from the signed webhook and is persisted with task context; it is not an operator-configured fallback. The Project node ID is derived from the resolved webhook item. The external HTTPS Ingress remains a platform responsibility: choose its hostname, TLS certificate/secret policy, and Ingress class, then configure the matching GitHub App webhook URL. The bundled `langgraph_service.workflow_operations` factory uses the local llama.cpp `/completion` provider and authenticated task-scoped source APIs. Configure `LLAMA_CPP_URL` to the internal inference service; the default is `http://llama-cpp-server.inference.svc.cluster.local:8080`. Install the inference deployment and model artifacts, verify model load and service readiness, and only then enable Codefactory task intake. The inference/GPU workload is deployed separately and is not included in Codefactory overlays. The required App grants remain an external deployment prerequisite. No cloud provider or workload sizing is bundled or implied.
+SQLite and mocked-connection tests validate local behavior and PostgreSQL claim SQL, not a live PostgreSQL server. Operators provide the PostgreSQL admin and service passwords, webhook secret, internal token, GitHub App private key and App ID. Optional Project status field and option-name overrides configure matching, not Project identity. The installation ID comes from the signed webhook and is persisted with task context; it is not an operator-configured fallback. The Project node ID is derived from the resolved webhook item. The external HTTPS Ingress remains a platform responsibility: choose its hostname, TLS certificate/secret policy, and Ingress class, then configure the matching GitHub App webhook URL. The bundled `langgraph_service.workflow.workflow_operations` factory uses the local llama.cpp `/completion` provider and authenticated task-scoped source APIs. Configure `LLAMA_CPP_URL` to the internal inference service; the default is `http://llama-cpp-server.inference.svc.cluster.local:8080`. Install the inference deployment and model artifacts, verify model load and service readiness, and only then enable Codefactory task intake. The inference/GPU workload is deployed separately and is not included in Codefactory overlays. The required App grants remain an external deployment prerequisite. No cloud provider or workload sizing is bundled or implied.
 
 ## 7. Observability and operations
 

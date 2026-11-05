@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+    app.kubernetes.io/part-of: inference-platform
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-exporter
+        app.kubernetes.io/part-of: inference-platform
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: k8s-node01
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: dcgm-exporter
+        image: nvcr.io/nvidia/k8s/dcgm-exporter:4.2.3-4.1.3-ubuntu22.04
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: DCGM_EXPORTER_LISTEN
+          value: ":9400"
+        - name: DCGM_EXPORTER_KUBERNETES
+          value: "true"
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        ports:
+        - name: metrics
+          containerPort: 9400
+          protocol: TCP
+        volumeMounts:
+        - name: pod-gpu-resources
+          mountPath: /var/lib/kubelet/pod-resources
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+        startupProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          periodSeconds: 30
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1
+            memory: 512Mi
+        securityContext:
+          runAsNonRoot: false
+          runAsUser: 0
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ "ALL" ]
+            add: [ "SYS_ADMIN" ]
+      volumes:
+      - name: pod-gpu-resources
+        hostPath:
+          path: /var/lib/kubelet/pod-resources
+          type: Directory
+      - name: tmp
+        emptyDir:
+          sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  labels:
+    app.kubernetes.io/name: dcgm-exporter
+    app.kubernetes.io/part-of: inference-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dcgm-exporter
+  ports:
+  - name: metrics
+    port: 9400
+    targetPort: metrics
+    protocol: TCP

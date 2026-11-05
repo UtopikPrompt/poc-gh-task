@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -6,6 +7,37 @@ from github_service.delivery_store import (
     PostgresDeliveryStore,
     SQLiteDeliveryStore,
 )
+
+
+def test_postgres_event_inbox_migration_allows_feedback_reply():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "006_github_human_feedback_reply.sql"
+    )
+    migration = " ".join(migration_path.read_text().split())
+
+    assert "DROP CONSTRAINT IF EXISTS task_event_inbox_event_type_check" in migration
+    assert (
+        "CHECK ( event_type IN ( 'ready', 'ci', 'merged', "
+        "'review_changes_requested', 'human_feedback_reply' ) )"
+    ) in migration
+
+
+def test_postgres_event_inbox_migration_allows_agent_repair_request():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "007_github_agent_repair_requested.sql"
+    )
+    migration = " ".join(migration_path.read_text().split())
+
+    assert "DROP CONSTRAINT IF EXISTS task_event_inbox_event_type_check" in migration
+    assert (
+        "CHECK ( event_type IN ( 'ready', 'ci', 'merged', "
+        "'review_changes_requested', 'human_feedback_reply', "
+        "'agent_repair_requested' ) )"
+    ) in migration
 
 
 def _ready_event(task_id):
@@ -75,6 +107,44 @@ def test_sqlite_queue_retries_and_dead_letters_at_attempt_limit(tmp_path):
             (event_id,),
         ).fetchone()
         assert tuple(row) == ("dead", 2, "permanent")
+    finally:
+        store.close()
+
+
+def test_sqlite_requeues_latest_dead_task_event_without_changing_payload(tmp_path):
+    store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
+    try:
+        store.claim_delivery("delivery-retry")
+        event = _ready_event("task-retry")
+        event_id = store.enqueue_events("delivery-retry", [event])[0]
+        store.complete_delivery("delivery-retry", {"status": "queued"})
+        claim = store.claim_event(max_attempts=1)
+        assert claim is not None
+        assert store.retry_event(
+            event_id, claim["claim_token"], "worker error", max_attempts=1
+        )
+
+        assert store.requeue_failed_task("task-retry") is True
+        assert store.requeue_failed_task("task-retry") is False
+        retried = store.claim_event(max_attempts=1)
+        assert retried is not None
+        assert retried["attempt"] == 1
+        assert retried["payload"] == event
+    finally:
+        store.close()
+
+
+def test_sqlite_requeue_rejects_missing_or_non_dead_task_event(tmp_path):
+    store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
+    try:
+        store.claim_delivery("delivery-active")
+        store.enqueue_events(
+            "delivery-active", [{"task_id": "task-active", "event_type": "ci"}]
+        )
+        store.complete_delivery("delivery-active", {"status": "queued"})
+
+        assert store.requeue_failed_task("missing-task") is False
+        assert store.requeue_failed_task("task-active") is False
     finally:
         store.close()
 
@@ -366,6 +436,54 @@ def test_postgres_workflow_summary_projects_delivery_and_pull_request_status():
     assert "LEFT JOIN github_service.webhook_deliveries delivery" in query
     assert "LEFT JOIN latest_ci ci" in query
     assert "merged.payload->>'merged' = 'true'" in query
+
+
+def test_postgres_requeue_locks_only_the_latest_dead_event():
+    statements = []
+
+    class Cursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def execute(self, statement, params=()):
+            statements.append((statement, params))
+
+        def fetchone(self):
+            return {"event_id": "event-dead", "state": "dead"}
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def cursor(self):
+            return Cursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    store = PostgresDeliveryStore(
+        "postgresql://test",
+        connection_factory=Connection,
+    )
+
+    assert store.requeue_failed_task("task-1") is True
+    assert "LIMIT 1 FOR UPDATE OF o" in statements[0][0]
+    assert "attempts = 0" in statements[1][0]
+    assert statements[1][1] == ("event-dead",)
 
 
 @pytest.mark.parametrize("stored_installation_id", [654, 987])

@@ -10,9 +10,13 @@ from typing import Any, Protocol, Self
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from langgraph_service.config_store import PostgresAgentConfigStore
-from langgraph_service.operations import Operation, WorkflowOperations
-from langgraph_service.task_graph import build_task_graph
+from langgraph_service.storage.agent_roster_store import PostgresAgentRosterStore
+from langgraph_service.storage.config_store import PostgresAgentConfigStore
+from langgraph_service.workflow.operations import Operation, WorkflowOperations
+from langgraph_service.workflow.task_graph import (
+    TASK_GRAPH_NODE_NAMES,
+    build_task_graph,
+)
 
 
 class TaskLifecycle(Protocol):
@@ -37,6 +41,7 @@ class LangGraphTaskService:
         postgres_saver_factory: Any | None = None,
         publish_pr: Operation | None = None,
         agent_config_store: PostgresAgentConfigStore | None = None,
+        agent_roster_store: PostgresAgentRosterStore | None = None,
     ):
         if (database_path is None) == (database_url is None):
             raise ValueError("configure exactly one local path or PostgreSQL URL")
@@ -46,6 +51,7 @@ class LangGraphTaskService:
         self._postgres_saver_factory = postgres_saver_factory
         self._publish_pr = publish_pr
         self._agent_config_store = agent_config_store
+        self._agent_roster_store = agent_roster_store
         self._saver_context: AbstractContextManager[BaseCheckpointSaver] | None = None
         self._checkpointer: BaseCheckpointSaver | None = None
         self._graph: CompiledTaskGraph | None = None
@@ -96,18 +102,14 @@ class LangGraphTaskService:
         graph_config = {"configurable": {"thread_id": task_id}}
         run_event = dict(event)
         run_event.pop("agent_config", None)
-        if run_event.get("event_type") == "ready" and self._agent_config_store:
-            snapshot = self._graph.get_state(graph_config)
-            snapshot_config = getattr(snapshot, "config", None)
-            configurable = (
-                snapshot_config.get("configurable", {})
-                if isinstance(snapshot_config, Mapping)
-                else {}
+        run_event.pop("agent_roster_snapshot", None)
+        if run_event.get("event_type") == "ready":
+            if self._agent_roster_store is None:
+                raise RuntimeError("task start requires an agent roster store")
+            run_event["agent_roster_snapshot"] = (
+                self._agent_roster_store.resolve_for_task(task_id)
             )
-            has_checkpoint = isinstance(configurable, Mapping) and bool(
-                configurable.get("checkpoint_id")
-            )
-            if not has_checkpoint:
+            if self._agent_config_store:
                 run_event["agent_config"] = (
                     self._agent_config_store.get().config.model_dump()
                 )
@@ -156,6 +158,7 @@ class LangGraphTaskService:
                 ),
                 created_at=snapshot.created_at,
                 metadata=snapshot.metadata,
+                next_nodes=snapshot.next,
             )
             for snapshot in history
         ]
@@ -171,6 +174,7 @@ def _execution_projection(
     checkpoint_id: object,
     created_at: object,
     metadata: object,
+    next_nodes: object = (),
 ) -> dict[str, object]:
     state = values if isinstance(values, Mapping) else {}
     safe_values = {
@@ -185,6 +189,37 @@ def _execution_projection(
         if isinstance((value := state.get(field)), str) and value
     }
     step = metadata.get("step") if isinstance(metadata, Mapping) else None
+    safe_next_nodes = (
+        [
+            node
+            for node in next_nodes
+            if isinstance(node, str) and node in TASK_GRAPH_NODE_NAMES
+        ]
+        if isinstance(next_nodes, (list, tuple))
+        else []
+    )
+    raw_resolution = state.get("no_ci_resolution")
+    resolution = None
+    if isinstance(raw_resolution, Mapping):
+        actor = raw_resolution.get("actor")
+        decided_at = raw_resolution.get("decided_at")
+        decision = raw_resolution.get("decision")
+        pull_request_id = raw_resolution.get("pull_request_id")
+        if (
+            isinstance(actor, str)
+            and len(actor) <= 39
+            and isinstance(decided_at, str)
+            and len(decided_at) <= 40
+            and decision == "proceed_without_ci"
+            and isinstance(pull_request_id, str)
+            and len(pull_request_id) <= 200
+        ):
+            resolution = {
+                "actor": actor,
+                "decided_at": decided_at,
+                "decision": decision,
+                "pull_request_id": pull_request_id,
+            }
     return {
         "thread_id": thread_id[:200],
         "checkpoint_id": checkpoint_id[:200]
@@ -192,5 +227,7 @@ def _execution_projection(
         else None,
         "created_at": created_at[:40] if isinstance(created_at, str) else None,
         "step": step if isinstance(step, int) and not isinstance(step, bool) else None,
+        "next_nodes": safe_next_nodes,
+        "no_ci_resolution": resolution,
         **safe_values,
     }

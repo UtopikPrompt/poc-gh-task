@@ -33,6 +33,7 @@ class GitHubAppClient:
         api_url: str = "https://api.github.com",
         status_field_name: str = "Status",
         ready_option_name: str = "Ready",
+        in_progress_option_name: str = "In Progress",
         done_option_name: str = "Done",
         transport: httpx.BaseTransport | None = None,
     ):
@@ -40,12 +41,18 @@ class GitHubAppClient:
             raise ValueError("GITHUB_APP_ID must be a positive integer")
         if not all(
             name.strip()
-            for name in (status_field_name, ready_option_name, done_option_name)
+            for name in (
+                status_field_name,
+                ready_option_name,
+                in_progress_option_name,
+                done_option_name,
+            )
         ):
             raise ValueError("GitHub Project status names must not be empty")
         self._app_id = app_id
         self._status_field_name = status_field_name
         self._ready_option_name = ready_option_name
+        self._in_progress_option_name = in_progress_option_name
         self._done_option_name = done_option_name
         self._private_key = private_key_path.read_text(encoding="utf-8")
         self._api_url = api_url.rstrip("/")
@@ -78,6 +85,7 @@ class GitHubAppClient:
             api_url=settings.github_api_url,
             status_field_name=settings.project_status_field_name,
             ready_option_name=settings.project_ready_option_name,
+            in_progress_option_name=settings.project_in_progress_option_name,
             done_option_name=settings.project_done_option_name,
         )
 
@@ -165,9 +173,12 @@ class GitHubAppClient:
             or owner_type not in owner_types
         ):
             raise TypeError("Project owner is unavailable or unsupported")
-        status_field_id, ready_option_id, done_option_id = (
-            self._project_status_configuration(project)
-        )
+        (
+            status_field_id,
+            ready_option_id,
+            in_progress_option_id,
+            done_option_id,
+        ) = self._project_status_configuration(project)
         repository = content.get("repository")
         field_values = item.get("fieldValues")
         page_info = (
@@ -216,6 +227,7 @@ class GitHubAppClient:
             "status_field_id": status_field_id,
             "status_option_id": status_option_id,
             "ready_option_id": ready_option_id,
+            "in_progress_option_id": in_progress_option_id,
             "done_option_id": done_option_id,
             "status_field_name": self._status_field_name,
             "status_option_name": status_option_name,
@@ -310,9 +322,11 @@ class GitHubAppClient:
         )
         return {
             "pull_request_id": str(pull_request_id),
+            "head_sha": head_sha,
             "ci_checks": normalized_checks,
-            "ci_complete": bool(normalized_checks)
-            and all(check["status"] == "success" for check in normalized_checks),
+            "ci_complete": all(
+                check["status"] == "success" for check in normalized_checks
+            ),
         }
 
     def create_pull_request(
@@ -342,6 +356,25 @@ class GitHubAppClient:
             result,
             repository=repository,
         )
+
+    def update_pull_request_body(
+        self,
+        repository: str,
+        number: int,
+        body: str,
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.pulls.update(
+                owner,
+                repo,
+                number,
+                data={"body": body},
+            ).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid pull request")
+        return _pull_request_summary(result, repository=repository)
 
     def get_repository(
         self,
@@ -530,6 +563,130 @@ class GitHubAppClient:
             raise TypeError("GitHub returned an invalid pull request")
         return _pull_request_summary(result, repository=repository)
 
+    def get_pull_request_review_comments(
+        self,
+        repository: str,
+        pull_request_number: int,
+        review_id: int,
+        installation_id: int,
+    ) -> list[Mapping[str, object]]:
+        owner, repo = repository.split("/", 1)
+        comments: list[Mapping[str, object]] = []
+        with self._rest_client(installation_id) as client:
+            for comment in client.rest.paginate(
+                client.rest.pulls.list_comments_for_review,
+                map_func=self._pagination_mapper(None),
+                owner=owner,
+                repo=repo,
+                pull_number=pull_request_number,
+                review_id=review_id,
+                per_page=20,
+            ):
+                if not isinstance(comment, Mapping):
+                    raise TypeError("GitHub returned an invalid review comment")
+                comments.append(dict(comment))
+                if len(comments) == 20:
+                    break
+        return comments
+
+    def find_issue_comment(
+        self,
+        repository: str,
+        issue_number: int,
+        marker: str,
+        installation_id: int,
+    ) -> str | None:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            for comment in client.rest.paginate(
+                client.rest.issues.list_comments,
+                map_func=self._pagination_mapper(None),
+                owner=owner,
+                repo=repo,
+                issue_number=issue_number,
+                per_page=100,
+            ):
+                if not isinstance(comment, Mapping):
+                    raise TypeError("GitHub returned an invalid issue comment")
+                body = comment.get("body")
+                comment_id = comment.get("id")
+                if isinstance(body, str) and marker in body:
+                    if not isinstance(comment_id, (str, int)) or isinstance(
+                        comment_id, bool
+                    ):
+                        raise TypeError("GitHub returned an invalid issue comment")
+                    return str(comment_id)
+        return None
+
+    def create_issue_comment(
+        self,
+        repository: str,
+        issue_number: int,
+        body: str,
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.issues.create_comment(
+                owner,
+                repo,
+                issue_number,
+                data={"body": body},
+            ).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid issue comment")
+        return dict(result)
+
+    def find_review_comment(
+        self,
+        repository: str,
+        pull_request_number: int,
+        marker: str,
+        installation_id: int,
+    ) -> str | None:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            for comment in client.rest.paginate(
+                client.rest.pulls.list_review_comments,
+                map_func=self._pagination_mapper(None),
+                owner=owner,
+                repo=repo,
+                pull_number=pull_request_number,
+                per_page=100,
+            ):
+                if not isinstance(comment, Mapping):
+                    raise TypeError("GitHub returned an invalid review comment")
+                body = comment.get("body")
+                comment_id = comment.get("id")
+                if isinstance(body, str) and marker in body:
+                    if not isinstance(comment_id, (str, int)) or isinstance(
+                        comment_id, bool
+                    ):
+                        raise TypeError("GitHub returned an invalid review comment")
+                    return str(comment_id)
+        return None
+
+    def create_review_comment_reply(
+        self,
+        repository: str,
+        pull_request_number: int,
+        in_reply_to: int,
+        body: str,
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        owner, repo = repository.split("/", 1)
+        with self._rest_client(installation_id) as client:
+            result = client.rest.pulls.create_reply_for_review_comment(
+                owner,
+                repo,
+                pull_request_number,
+                in_reply_to,
+                data={"body": body},
+            ).json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub returned an invalid review comment")
+        return dict(result)
+
     def find_pull_requests(
         self,
         repository: str,
@@ -564,6 +721,7 @@ class GitHubAppClient:
         pull_request_number: int,
         expected_pull_request_id: str,
         installation_id: int,
+        no_ci_resolution: Mapping[str, object] | None = None,
     ) -> Mapping[str, object]:
         owner, repo = repository.split("/", 1)
         with self._rest_client(installation_id) as client:
@@ -588,14 +746,24 @@ class GitHubAppClient:
             installation_id,
         )
         checks = ci.get("ci_checks")
+        resolved_without_ci = (
+            no_ci_resolution is not None
+            and no_ci_resolution.get("decision") == "proceed_without_ci"
+            and no_ci_resolution.get("pull_request_id") == expected_pull_request_id
+        )
         verified = (
             str(ci.get("pull_request_id")) == expected_pull_request_id
             and ci.get("ci_complete") is True
             and isinstance(checks, list)
-            and bool(checks)
-            and all(
-                isinstance(check, Mapping) and check.get("status") == "success"
-                for check in checks
+            and (
+                (
+                    bool(checks)
+                    and all(
+                        isinstance(check, Mapping) and check.get("status") == "success"
+                        for check in checks
+                    )
+                )
+                or (resolved_without_ci and not checks)
             )
         )
         return {"verified": verified}
@@ -651,6 +819,76 @@ class GitHubAppClient:
                 "itemId": item_id,
                 "fieldId": status_field_id,
                 "optionId": done_option_id,
+            },
+            installation_id=installation_id,
+        )
+        updated_item = result.get("updateProjectV2ItemFieldValue")
+        if not isinstance(updated_item, Mapping) or not isinstance(
+            updated_item.get("projectV2Item"), Mapping
+        ):
+            raise TypeError("GitHub did not confirm the Project status update")
+        return result
+
+    def mark_task_in_progress(
+        self,
+        state: Mapping[str, object],
+        installation_id: int,
+    ) -> Mapping[str, object]:
+        project_id = state.get("project_node_id")
+        item_id = state.get("project_item_id")
+        owner = state.get("project_owner")
+        owner_type = state.get("project_owner_type")
+        repository = state.get("target_repository")
+        if (
+            not isinstance(project_id, str)
+            or not isinstance(item_id, str)
+            or not isinstance(owner, str)
+            or owner_type not in {"organization", "user"}
+            or not isinstance(repository, str)
+        ):
+            raise TypeError("Task is missing its GitHub Project identity")
+        resolved = self.get_project_item(item_id, installation_id)
+        issue = resolved.get("issue")
+        if (
+            resolved.get("project_node_id") != project_id
+            or resolved.get("project_owner") != owner
+            or resolved.get("project_owner_type") != owner_type
+            or not isinstance(issue, Mapping)
+            or not isinstance(issue.get("repository"), str)
+            or issue["repository"].casefold() != repository.casefold()
+        ):
+            raise ValueError("Task Project item no longer matches its saved identity")
+        if resolved.get("is_archived") is True or issue.get("state") != "OPEN":
+            raise ValueError("Task is no longer open and active in its Project")
+        current_status = resolved.get("status_option_name")
+        if current_status == self._in_progress_option_name:
+            return {"updated": False, "status": current_status}
+        if current_status != self._ready_option_name:
+            raise ValueError("Task is no longer ready for execution")
+        status_field_id = resolved.get("status_field_id")
+        in_progress_option_id = resolved.get("in_progress_option_id")
+        if not isinstance(status_field_id, str) or not isinstance(
+            in_progress_option_id, str
+        ):
+            raise TypeError("Project In Progress status option is unavailable")
+        result = self._graphql(
+            """
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId,
+                itemId: $itemId,
+                fieldId: $fieldId,
+                value: { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item { id }
+              }
+            }
+            """,
+            {
+                "projectId": project_id,
+                "itemId": item_id,
+                "fieldId": status_field_id,
+                "optionId": in_progress_option_id,
             },
             installation_id=installation_id,
         )
@@ -741,7 +979,7 @@ class GitHubAppClient:
     def _project_status_configuration(
         self,
         project: Mapping[str, object],
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str | None, str]:
         fields = project.get("fields")
         nodes = fields.get("nodes") if isinstance(fields, Mapping) else None
         page_info = fields.get("pageInfo") if isinstance(fields, Mapping) else None
@@ -783,9 +1021,18 @@ class GitHubAppClient:
                 raise RuntimeError("GitHub Project status option is incomplete")
             return result
 
+        def optional_option_id(name: str) -> str | None:
+            if not any(
+                isinstance(option, Mapping) and option.get("name") == name
+                for option in options
+            ):
+                return None
+            return option_id(name)
+
         return (
             field_id,
             option_id(self._ready_option_name),
+            optional_option_id(self._in_progress_option_name),
             option_id(self._done_option_name),
         )
 
@@ -826,15 +1073,24 @@ def _pull_request_summary(
         or not isinstance(head, Mapping)
         or not isinstance(base, Mapping)
         or not isinstance(head.get("ref"), str)
+        or not isinstance(head.get("sha"), str)
+        or not head.get("sha")
         or not isinstance(base.get("ref"), str)
+        or not isinstance(base_repository, Mapping)
+        or not isinstance(base_repository.get("full_name"), str)
     ):
         raise TypeError("GitHub pull request response is missing its identity or refs")
     if actual_repository.casefold() != repository.casefold():
         raise TypeError("GitHub pull request response repository did not match")
+    if base_repository["full_name"].casefold() != repository.casefold():
+        raise TypeError("GitHub pull request base repository did not match")
     return {
         "pull_request_id": str(pull_request_id),
         "repository": actual_repository,
         "head_repository": actual_head_repository,
+        "head_sha": head["sha"],
+        "base_sha": base.get("sha"),
+        "body": result.get("body"),
         "number": number,
         "head": head["ref"],
         "base": base["ref"],

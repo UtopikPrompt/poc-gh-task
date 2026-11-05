@@ -158,3 +158,80 @@ def test_internal_workflow_projection_includes_observed_ci_and_merge_status(
     assert workflow["pull_request_merged"] is True
     assert workflow["ci_status"] == "success"
     assert workflow["ci_complete"] is True
+
+
+def test_internal_workflow_projection_includes_review_changes_requested(tmp_path):
+    app = _create_app(tmp_path)
+    delivery_id = "review-changes-delivery"
+
+    with TestClient(app) as client:
+        store = app.state.internal_runtime.store
+        store.claim_delivery(delivery_id)
+        store.enqueue_events(
+            delivery_id,
+            [
+                {
+                    "task_id": "PVTI_review-task",
+                    "event_type": "review_changes_requested",
+                    "event_pull_request_id": "PR_review-id",
+                    "review_feedback": "Please address the requested changes.",
+                    "installation_id": 654,
+                    "webhook_delivery_id": delivery_id,
+                }
+            ],
+        )
+        store.complete_delivery(delivery_id, {"status": "queued"})
+        response = client.get(
+            "/internal/management/workflows",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+
+    assert response.status_code == 200
+    workflow = response.json()["workflows"][0]
+    Draft202012Validator(_workflow_summary_schema()).validate(workflow)
+    assert workflow["latest_event"] == "review_changes_requested"
+
+
+def test_internal_workflow_projection_keeps_empty_ci_unavailable(tmp_path):
+    app = _create_app(tmp_path)
+
+    with TestClient(app) as client:
+        store = app.state.internal_runtime.store
+        delivery_id = "no-ci-delivery"
+        store.claim_delivery(delivery_id)
+        store.enqueue_events(
+            delivery_id,
+            [
+                {
+                    "task_id": "PVTI_no-ci-task",
+                    "task_status": "ready",
+                    "event_type": "ready",
+                    "target_repositories": ["example/project"],
+                    "project_owner": "example",
+                    "project_owner_type": "organization",
+                    "project_node_id": "PVT_project-id",
+                    "project_item_id": "PVTI_no-ci-task",
+                    "installation_id": 654,
+                },
+                {
+                    "task_id": "PVTI_no-ci-task",
+                    "event_type": "ci",
+                    "event_pull_request_id": "PR_no-ci-id",
+                    "ci_checks": [],
+                    "ci_complete": True,
+                },
+            ],
+        )
+        store.complete_delivery(delivery_id, {"status": "queued"})
+        store.register_pull_request(
+            "example/project", 49, "PVTI_no-ci-task", "PR_no-ci-id"
+        )
+        response = client.get(
+            "/internal/management/workflows",
+            headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+        )
+
+    workflow = response.json()["workflows"][0]
+    Draft202012Validator(_workflow_summary_schema()).validate(workflow)
+    assert workflow["ci_status"] == "unavailable"
+    assert workflow["ci_complete"] is True

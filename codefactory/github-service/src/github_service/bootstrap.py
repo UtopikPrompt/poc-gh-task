@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from github_service.completion import GitHubTaskCompletion
+from github_service.conversation import GitHubTaskConversation
+from github_service.execution import GitHubTaskExecutionReporter
 from github_service.delivery_store import (
     PostgresDeliveryStore,
     SQLiteDeliveryStore,
@@ -36,13 +38,22 @@ def create_app(
     normalize_event: EventNormalizer,
     settings: RuntimeSettings | None = None,
     close_resources: Sequence[Callable[[], None]] = (),
-    complete_task_factory: Callable[[object], Callable[[str], dict[str, object]]]
+    complete_task_factory: Callable[
+        [object],
+        Callable[[str, Mapping[str, object] | None], dict[str, object]],
+    ]
+    | None = None,
+    start_task_factory: Callable[[object], Callable[[str], dict[str, object]]]
     | None = None,
     propose_file_changes_factory: Callable[
         [object], Callable[[FileChangeProposal], dict[str, object]]
     ]
     | None = None,
     source_context_factory: Callable[[object], GitHubTaskSource] | None = None,
+    request_human_feedback_factory: Callable[
+        [object], Callable[[str, str, str, int | None], dict[str, object]]
+    ]
+    | None = None,
 ) -> FastAPI:
     settings = settings or RuntimeSettings.from_environment()
 
@@ -73,6 +84,9 @@ def create_app(
                 if complete_task_factory is not None
                 else None
             ),
+            start_task=(
+                start_task_factory(store) if start_task_factory is not None else None
+            ),
             propose_file_changes=(
                 propose_file_changes_factory(store)
                 if propose_file_changes_factory is not None
@@ -83,6 +97,11 @@ def create_app(
             ),
             get_source_files=(
                 source_context.read_files if source_context is not None else None
+            ),
+            request_human_feedback=(
+                request_human_feedback_factory(store)
+                if request_human_feedback_factory is not None
+                else None
             ),
         )
         try:
@@ -117,6 +136,10 @@ def create_github_app(
             store=store,
             github=client,
         ),
+        start_task_factory=lambda store: GitHubTaskExecutionReporter(
+            store=store,
+            github=client,
+        ),
         propose_file_changes_factory=lambda store: (
             GitHubTaskPublisher(
                 store=store,
@@ -126,6 +149,12 @@ def create_github_app(
         source_context_factory=lambda store: GitHubTaskSource(
             store=store,
             github=client,
+        ),
+        request_human_feedback_factory=lambda store: (
+            GitHubTaskConversation(
+                store=store,
+                github=client,
+            ).request_human_feedback
         ),
     )
 

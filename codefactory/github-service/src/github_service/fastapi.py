@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -22,6 +22,8 @@ from github_service.webhooks import (
 
 class InternalStore(Protocol):
     def list_workflows(self) -> list[dict[str, object]]: ...
+
+    def requeue_failed_task(self, task_id: str) -> bool: ...
 
     def claim_event(
         self,
@@ -48,12 +50,18 @@ class InternalServiceRuntime:
     token: str
     lease_seconds: int = 60
     max_attempts: int = 8
-    complete_task: Callable[[str], dict[str, object]] | None = None
+    complete_task: (
+        Callable[[str, Mapping[str, object] | None], dict[str, object]] | None
+    ) = None
+    start_task: Callable[[str], dict[str, object]] | None = None
     propose_file_changes: Callable[[FileChangeProposal], dict[str, object]] | None = (
         None
     )
     get_source_tree: Callable[[str], dict[str, object]] | None = None
-    get_source_files: Callable[[str, object], dict[str, object]] | None = None
+    get_source_files: Callable[..., dict[str, object]] | None = None
+    request_human_feedback: (
+        Callable[[str, str, str, int | None], dict[str, object]] | None
+    ) = None
 
 
 MAX_PROPOSAL_REQUEST_BYTES = 2 * 1024 * 1024
@@ -158,6 +166,24 @@ def create_http_app(
                 status_code=503, detail="workflow state unavailable"
             ) from error
         return {"workflows": workflows}
+
+    @app.post("/internal/management/workflows/{task_id}/retry")
+    async def retry_management_workflow(
+        task_id: str, request: Request
+    ) -> dict[str, bool]:
+        runtime = internal_runtime(request)
+        if not task_id or len(task_id) > 200:
+            raise HTTPException(status_code=404, detail="workflow not found")
+        requeued = await run_in_threadpool(
+            runtime.store.requeue_failed_task,
+            task_id,
+        )
+        if not requeued:
+            raise HTTPException(
+                status_code=409,
+                detail="workflow is not eligible for retry",
+            )
+        return {"requeued": True}
 
     @app.post("/internal/events/claim")
     async def claim_event(request: Request) -> dict[str, object]:
@@ -264,16 +290,87 @@ def create_http_app(
         if runtime.get_source_files is None:
             raise HTTPException(status_code=503, detail="source context unavailable")
         payload = await _bounded_json(request, MAX_SOURCE_REQUEST_BYTES)
-        if not isinstance(payload, dict) or set(payload) != {"task_id", "paths"}:
-            raise HTTPException(
-                status_code=400, detail="request must contain task_id and paths"
-            )
+        allowed_fields = {
+            "task_id",
+            "paths",
+            "pull_request_number",
+            "expected_pull_request_id",
+        }
+        if (
+            not isinstance(payload, dict)
+            or not {"task_id", "paths"}.issubset(payload)
+            or set(payload) - allowed_fields
+        ):
+            raise HTTPException(status_code=400, detail="invalid source files request")
         task_id = payload.get("task_id")
+        pull_request_number = payload.get("pull_request_number")
+        expected_pull_request_id = payload.get("expected_pull_request_id")
         if not isinstance(task_id, str) or not task_id:
             raise HTTPException(status_code=400, detail="task_id is required")
+        if (pull_request_number is None) != (expected_pull_request_id is None):
+            raise HTTPException(status_code=400, detail="invalid pull request identity")
+        if pull_request_number is not None and (
+            not isinstance(pull_request_number, int)
+            or isinstance(pull_request_number, bool)
+            or pull_request_number <= 0
+            or not isinstance(expected_pull_request_id, str)
+            or not expected_pull_request_id.isdecimal()
+            or int(expected_pull_request_id) <= 0
+        ):
+            raise HTTPException(status_code=400, detail="invalid pull request identity")
         try:
+            if pull_request_number is not None:
+                return await run_in_threadpool(
+                    runtime.get_source_files,
+                    task_id,
+                    payload.get("paths"),
+                    pull_request_number,
+                    expected_pull_request_id,
+                )
             return await run_in_threadpool(
                 runtime.get_source_files, task_id, payload.get("paths")
+            )
+        except (ValueError, TypeError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/internal/github/request-human-feedback")
+    async def request_human_feedback(request: Request) -> dict[str, object]:
+        runtime = internal_runtime(request)
+        if runtime.request_human_feedback is None:
+            raise HTTPException(status_code=503, detail="PR conversation unavailable")
+        payload = await _bounded_json(request, 8 * 1024)
+        if (
+            not isinstance(payload, dict)
+            or not {"task_id", "question", "dedupe_key"}.issubset(payload)
+            or set(payload)
+            - {"task_id", "question", "dedupe_key", "source_review_comment_id"}
+        ):
+            raise HTTPException(status_code=400, detail="invalid feedback request")
+        task_id = payload.get("task_id")
+        question = payload.get("question")
+        dedupe_key = payload.get("dedupe_key")
+        source_review_comment_id = payload.get("source_review_comment_id")
+        if (
+            not isinstance(task_id, str)
+            or not isinstance(question, str)
+            or not isinstance(dedupe_key, str)
+            or (
+                source_review_comment_id is not None
+                and (
+                    not isinstance(source_review_comment_id, int)
+                    or isinstance(source_review_comment_id, bool)
+                    or source_review_comment_id <= 0
+                )
+            )
+        ):
+            raise HTTPException(status_code=400, detail="invalid feedback request")
+        try:
+            return await run_in_threadpool(
+                runtime.request_human_feedback,
+                task_id,
+                question,
+                dedupe_key,
+                source_review_comment_id,
             )
         except (ValueError, TypeError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
@@ -287,7 +384,33 @@ def create_http_app(
         task_id = payload.get("task_id") if isinstance(payload, dict) else None
         if not isinstance(task_id, str) or not task_id:
             raise HTTPException(status_code=400, detail="task_id is required")
-        return await run_in_threadpool(runtime.complete_task, task_id)
+        resolution = (
+            payload.get("no_ci_resolution") if isinstance(payload, dict) else None
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) - {"task_id", "no_ci_resolution"}
+            or (resolution is not None and not isinstance(resolution, Mapping))
+        ):
+            raise HTTPException(status_code=400, detail="invalid completion request")
+        return await run_in_threadpool(runtime.complete_task, task_id, resolution)
+
+    @app.post("/internal/github/start-task")
+    async def start_task(request: Request) -> dict[str, object]:
+        runtime = internal_runtime(request)
+        if runtime.start_task is None:
+            raise HTTPException(status_code=503, detail="task start unavailable")
+        payload = await request.json()
+        task_id = payload.get("task_id") if isinstance(payload, dict) else None
+        if not isinstance(task_id, str) or not task_id:
+            raise HTTPException(status_code=400, detail="task_id is required")
+        try:
+            result = await run_in_threadpool(runtime.start_task, task_id)
+        except (ValueError, TypeError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if result.get("started") is not True:
+            raise HTTPException(status_code=409, detail="task start was not confirmed")
+        return result
 
     return app
 

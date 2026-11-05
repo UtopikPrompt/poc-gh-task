@@ -5,6 +5,9 @@ metadata:
 spec:
   template:
     spec:
+      securityContext:
+        supplementalGroups:
+        - 20000
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -17,8 +20,7 @@ spec:
       containers:
       - name: llama-server
         args:
-        - --verbose
-        - -m
+        - --model
         - /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
         - --device
         - none

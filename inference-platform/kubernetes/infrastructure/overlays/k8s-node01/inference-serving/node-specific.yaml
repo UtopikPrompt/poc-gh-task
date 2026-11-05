@@ -8,6 +8,9 @@ spec:
     type: Recreate
   template:
     spec:
+      securityContext:
+        supplementalGroups:
+        - 20000
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -21,8 +24,8 @@ spec:
       - name: llama-server
         args:
         - --verbose
-        - -m
-        - /models/qwen2.5-32b-instruct-q8_0.gguf
+        - --model
+        - /models/qwen2.5-32b-instruct-q4_k_m.gguf
         - --n-gpu-layers
         - all
         - --device

@@ -4,6 +4,9 @@ resources:
 - inference-serving/base
 - inference-serving/cpu
 - infrastructure/overlays/k8s-node01/inference-storage
+- infrastructure/overlays/k8s-node01/model-download-worker
+- infrastructure/overlays/k8s-node01/model-rollout-reconciler
+- infrastructure/monitoring
 namespace: inference
 patches:
 - path: infrastructure/overlays/k8s-node01/inference-serving/node-specific.yaml

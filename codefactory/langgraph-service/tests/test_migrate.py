@@ -1,0 +1,90 @@
+from unittest.mock import MagicMock
+
+import pytest
+
+from langgraph_service.storage.migrate import (
+    INCREMENTAL_MIGRATION_FILES,
+    MIGRATION_FILES,
+    _apply_migrations,
+    _migration_files,
+)
+
+
+def _migration_directory(tmp_path, filenames):
+    for filename in filenames:
+        (tmp_path / filename).touch()
+    return tmp_path
+
+
+def test_full_profile_selects_all_migrations_in_fresh_install_order(tmp_path):
+    directory = _migration_directory(tmp_path, MIGRATION_FILES)
+
+    assert tuple(path.name for path in _migration_files("full", directory)) == (
+        MIGRATION_FILES
+    )
+
+
+def test_incremental_profile_selects_only_migrations_009_through_011(tmp_path):
+    directory = _migration_directory(tmp_path, MIGRATION_FILES)
+
+    assert (
+        tuple(path.name for path in _migration_files("inference-009-011", directory))
+        == INCREMENTAL_MIGRATION_FILES
+    )
+
+
+def test_migration_profile_fails_before_execution_if_a_file_is_missing(tmp_path):
+    directory = _migration_directory(tmp_path, INCREMENTAL_MIGRATION_FILES[:-1])
+
+    with pytest.raises(FileNotFoundError, match="011_inference_model_rollouts.sql"):
+        _migration_files("inference-009-011", directory)
+
+
+def test_migration_profile_rejects_an_invalid_registered_order(tmp_path):
+    directory = _migration_directory(tmp_path, INCREMENTAL_MIGRATION_FILES)
+
+    with pytest.raises(ValueError, match="migration order is invalid"):
+        _migration_files(
+            "inference-009-011",
+            directory,
+            registered_files=tuple(reversed(INCREMENTAL_MIGRATION_FILES)),
+        )
+
+
+def test_each_migration_is_applied_in_its_own_transaction(monkeypatch, tmp_path):
+    migrations = tuple(tmp_path / filename for filename in INCREMENTAL_MIGRATION_FILES)
+    applied = []
+    monkeypatch.setattr(
+        "langgraph_service.storage.migrate._apply_sql_file",
+        lambda _connection, path: applied.append(path),
+    )
+    connection = MagicMock()
+
+    _apply_migrations(connection, migrations)
+
+    assert connection.transaction.call_count == len(migrations)
+    assert applied == list(migrations)
+
+
+def test_human_feedback_reply_migration_follows_review_event_migration():
+    review_event_index = MIGRATION_FILES.index("005_github_review_event.sql")
+
+    assert (
+        MIGRATION_FILES[review_event_index + 1] == "006_github_human_feedback_reply.sql"
+    )
+
+
+def test_agent_repair_request_migration_follows_feedback_reply_migration():
+    feedback_reply_index = MIGRATION_FILES.index("006_github_human_feedback_reply.sql")
+
+    assert (
+        MIGRATION_FILES[feedback_reply_index + 1]
+        == "007_github_agent_repair_requested.sql"
+    )
+
+
+def test_inference_instance_and_rollout_migrations_are_registered_in_order():
+    assert MIGRATION_FILES[-4] == "008_langgraph_model_profile.sql"
+    assert MIGRATION_FILES[-3] == "009_inference_instance_config.sql"
+    assert MIGRATION_FILES[-2] == "010_inference_model_downloads.sql"
+    assert MIGRATION_FILES[-1] == "011_inference_model_rollouts.sql"

@@ -25,6 +25,38 @@ PYTHONPATH=codefactory/langgraph-service/src uvicorn langgraph_service.host:crea
 PYTHONPATH=codefactory/management-portal/src uvicorn management_portal.host:create_app --factory --host 0.0.0.0 --port 8002
 ```
 
+For UI work, run the loopback-only preview app. It serves working-tree assets
+without OAuth and reads live workflow data from the dev services. Start these
+port-forwards in separate terminals:
+
+```sh
+kubectl -n codefactory port-forward --address 127.0.0.1 service/github-service 18000:8000
+kubectl -n codefactory port-forward --address 127.0.0.1 service/langgraph-service 18001:8001
+```
+
+Install the portal dependencies in a local virtual environment once:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e codefactory/management-portal
+```
+
+Then start the preview. It reads the internal service token from the dev Secret
+into the process environment; do not print or commit the token. The preview is
+read-only and binds only to localhost:
+
+```sh
+GITHUB_SERVICE_URL=http://127.0.0.1:18000 \
+LANGGRAPH_SERVICE_URL=http://127.0.0.1:18001 \
+INTERNAL_SERVICE_TOKEN="$(kubectl -n codefactory get secret codefactory-runtime-secrets -o jsonpath='{.data.INTERNAL_SERVICE_TOKEN}' | base64 --decode)" \
+PYTHONPATH=codefactory/management-portal/src \
+	python -m uvicorn \
+	management_portal.preview:create_app --factory --reload \
+	--reload-dir codefactory/management-portal/src \
+	--host 127.0.0.1 --port 8002
+```
+
 Optionally build service images locally with each service as the build context:
 
 ```sh
@@ -55,7 +87,7 @@ not a repository PAT.
 
 The intended human gates are: set the Project task to the configured start status (default `Ready`), then validate the PR by reviewing and merging it only after required CI checks succeed. The proposal API is implemented, but the bundled production operations factory is empty and no provider generates a proposal; ready tasks stop at context and no PR is produced. If an explicitly configured provider submits changes, GitHub Service validates and applies them to a deterministic task branch, then creates or reuses the verified task PR. Phase 2 `/agent <prompt>` rework may reuse this same-PR path, but its command, authorization, and clarification semantics remain unimplemented.
 
-The LangGraph image bundles `langgraph_service.workflow_operations` as its default factory, so no external module path is required. The factory intentionally returns empty operations: a ready task stops at `pending_external_operation` during context gathering and no proposal or PR is produced. A configured `prepare_changes` operation may return only a `changes` array of create/update file changes; the authenticated proposal API bounds it to 20 files, 64 KiB per file, 256 KiB total, and 2 MiB per raw request. GitHub Service obtains the repository and default branch from GitHub-owned task/repository state, writes only the deterministic task branch using non-force ref updates, and verifies/reuses the task PR. No context, planning, risk, change-preparation, or repair provider is included. Supply credentials and other secrets through runtime secret management, not image build arguments or image contents.
+The LangGraph image bundles `langgraph_service.workflow.workflow_operations` as its default factory, so no external module path is required. The factory intentionally returns empty operations: a ready task stops at `pending_external_operation` during context gathering and no proposal or PR is produced. A configured `prepare_changes` operation may return only a `changes` array of create/update file changes; the authenticated proposal API bounds it to 20 files, 64 KiB per file, 256 KiB total, and 2 MiB per raw request. GitHub Service obtains the repository and default branch from GitHub-owned task/repository state, writes only the deterministic task branch using non-force ref updates, and verifies/reuses the task PR. No context, planning, risk, change-preparation, or repair provider is included. Supply credentials and other secrets through runtime secret management, not image build arguments or image contents.
 
 GitHub-native repository rules must require all applicable PR checks before a human can merge. Following a merge webhook, GitHub service fetches the current PR identity/state and current check results again; it updates the mapped Project task to `done` only when the matching PR is merged and all reported checks are successful. LangGraph has no Project-write or merge capability.
 
@@ -94,6 +126,7 @@ Configure endpoint settings through the environment's Kubernetes ConfigMap and c
 | `GITHUB_API_URL` | Optional API origin; defaults to `https://api.github.com` |
 | `GITHUB_PROJECT_STATUS_FIELD_NAME` | Optional status field name; defaults to `Status` |
 | `GITHUB_PROJECT_READY_OPTION_NAME` | Optional ready option name; defaults to `Ready` |
+| `GITHUB_PROJECT_IN_PROGRESS_OPTION_NAME` | Optional execution option name; defaults to `In Progress` |
 | `GITHUB_PROJECT_DONE_OPTION_NAME` | Optional completion option name; defaults to `Done` |
 | `LOCAL_SQLITE_PATH` | Local-only SQLite path; defaults to `./var/github-local.sqlite` |
 | `WEBHOOK_MAX_BYTES` | Request size limit; defaults to 1,000,000 and must not exceed 10,000,000 |

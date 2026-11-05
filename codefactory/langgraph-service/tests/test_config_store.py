@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from langgraph_service.agent_config import AgentConfig
-from langgraph_service.config_store import PostgresAgentConfigStore
+from langgraph_service.storage.config_store import PostgresAgentConfigStore
 
 
 def test_postgres_config_store_uses_defaults_and_persists_audited_override():
@@ -45,7 +45,10 @@ def test_postgres_config_store_uses_defaults_and_persists_audited_override():
     store = PostgresAgentConfigStore("postgresql://test", connection_factory=connect)
 
     initial = store.get()
-    saved = store.update(AgentConfig(completion_timeout_seconds=60), updated_by="owner")
+    saved = store.update(
+        AgentConfig(completion_timeout_seconds=60),
+        updated_by="owner",
+    )
     current = store.get()
 
     assert initial.config == AgentConfig()

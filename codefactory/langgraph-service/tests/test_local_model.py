@@ -2,10 +2,12 @@ import json
 
 import httpx
 import pytest
-from langgraph_service.local_model import (
+from langgraph_service.providers.local_model import (
+    CPU_LLAMA_CPP_URL,
     DEFAULT_LLAMA_CPP_URL,
     LocalLlamaCppProposalProvider,
     READINESS_TIMEOUT_SECONDS,
+    SSE_PING_INTERVAL_SECONDS,
 )
 
 
@@ -19,12 +21,43 @@ def _envelope(content, **overrides):
     }
 
 
+def _stream_response(*events):
+    body = "".join(
+        f"data: {json.dumps(event, separators=(',', ':'))}\n\n" for event in events
+    )
+    return httpx.Response(
+        200,
+        content=body,
+        headers={"content-type": "text/event-stream"},
+    )
+
+
 def test_provider_posts_deterministic_schema_request_to_internal_completion():
     requests = []
 
     def handle(request):
         requests.append(request)
-        return httpx.Response(200, json=_envelope('{"paths":["src/task.py"]}'))
+        return _stream_response(
+            {
+                "content": '{"paths":',
+                "tokens": [1],
+                "stop": False,
+                "tokens_predicted": 1,
+            },
+            {
+                "content": '["src/task.py"]}',
+                "tokens": [2],
+                "stop": False,
+                "tokens_predicted": 2,
+            },
+            {
+                "content": "",
+                "tokens": [],
+                "stop": True,
+                "truncated": False,
+                "tokens_predicted": 2,
+            },
+        )
 
     provider = LocalLlamaCppProposalProvider(transport=httpx.MockTransport(handle))
     schema = {"type": "object", "required": ["paths"]}
@@ -47,11 +80,33 @@ def test_provider_posts_deterministic_schema_request_to_internal_completion():
         "top_k": 1,
         "top_p": 1,
         "n_predict": 1024,
-        "stream": False,
+        "stream": True,
         "cache_prompt": False,
         "json_schema": schema,
+        "sse_ping_interval": SSE_PING_INTERVAL_SECONDS,
     }
     assert result == {"paths": ["src/task.py"]}
+
+
+def test_provider_selects_curated_cpu_profile_endpoint():
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return _stream_response(_envelope('{"ok":true}', tokens_predicted=1))
+
+    provider = LocalLlamaCppProposalProvider(transport=httpx.MockTransport(handle))
+    try:
+        assert provider.complete(
+            prompt="prompt",
+            response_schema={"type": "object"},
+            max_tokens=20,
+            model_profile="qwen2_5_0_5b_cpu",
+        ) == {"ok": True}
+    finally:
+        provider.close()
+
+    assert str(requests[0].url) == f"{CPU_LLAMA_CPP_URL}/completion"
 
 
 @pytest.mark.parametrize(
@@ -66,8 +121,12 @@ def test_provider_posts_deterministic_schema_request_to_internal_completion():
     ],
 )
 def test_provider_fails_closed_on_invalid_or_incomplete_responses(envelope, message):
+    event = {"content": envelope.get("content", ""), "tokens": []}
+    for field in ("stop", "truncated", "tokens_predicted"):
+        if field in envelope:
+            event[field] = envelope[field]
     provider = LocalLlamaCppProposalProvider(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=envelope))
+        transport=httpx.MockTransport(lambda _: _stream_response(event))
     )
     try:
         with pytest.raises(ValueError, match=message):
@@ -83,7 +142,15 @@ def test_provider_fails_closed_on_invalid_or_incomplete_responses(envelope, mess
 def test_provider_rejects_non_object_content_external_urls_and_oversized_response():
     provider = LocalLlamaCppProposalProvider(
         transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, json=_envelope("[]"))
+            lambda _: _stream_response(
+                {
+                    "content": "[]",
+                    "tokens": [],
+                    "stop": True,
+                    "truncated": False,
+                    "tokens_predicted": 1,
+                }
+            )
         )
     )
     try:
@@ -101,7 +168,11 @@ def test_provider_rejects_non_object_content_external_urls_and_oversized_respons
 
     oversized = LocalLlamaCppProposalProvider(
         transport=httpx.MockTransport(
-            lambda _: httpx.Response(200, content=b"x" * (512 * 1024 + 1))
+            lambda _: httpx.Response(
+                200,
+                content=b"data: " + b"x" * (512 * 1024 + 1) + b"\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
         )
     )
     try:

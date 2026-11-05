@@ -30,7 +30,7 @@ spec:
         imagePullPolicy: Always
         command: [ "sh", "-ec" ]
         args:
-        - cp /app/migrations/001_github_event_queue.sql /migrations/001_github_event_queue.sql && cp /app/migrations/002_service_roles.sql /migrations/002_service_roles.sql && cp /app/migrations/003_github_task_installation.sql /migrations/003_github_task_installation.sql && cp /app/migrations/004_github_project_identity.sql /migrations/004_github_project_identity.sql
+        - cp /app/migrations/001_github_event_queue.sql /migrations/001_github_event_queue.sql && cp /app/migrations/002_service_roles.sql /migrations/002_service_roles.sql && cp /app/migrations/003_github_task_installation.sql /migrations/003_github_task_installation.sql && cp /app/migrations/004_github_project_identity.sql /migrations/004_github_project_identity.sql && cp /app/migrations/005_github_review_event.sql /migrations/005_github_review_event.sql && cp /app/migrations/006_github_human_feedback_reply.sql /migrations/006_github_human_feedback_reply.sql && cp /app/migrations/007_github_agent_repair_requested.sql /migrations/007_github_agent_repair_requested.sql
         volumeMounts:
         - name: migrations
           mountPath: /migrations
@@ -44,7 +44,7 @@ spec:
         imagePullPolicy: Always
         command: [ "sh", "-ec" ]
         args:
-        - cp /app/migrations/001_checkpoint_schema.sql /migrations/001_checkpoint_schema.sql && cp /app/migrations/002_agent_config.sql /migrations/002_agent_config.sql
+        - cp /app/migrations/001_checkpoint_schema.sql /migrations/001_checkpoint_schema.sql && cp /app/migrations/002_agent_config.sql /migrations/002_agent_config.sql && cp /app/migrations/003_agent_roster.sql /migrations/003_agent_roster.sql && cp /app/migrations/008_langgraph_model_profile.sql /migrations/008_langgraph_model_profile.sql && cp /app/migrations/009_inference_instance_config.sql /migrations/009_inference_instance_config.sql && cp /app/migrations/010_inference_model_downloads.sql /migrations/010_inference_model_downloads.sql && cp /app/migrations/011_inference_model_rollouts.sql /migrations/011_inference_model_rollouts.sql
         volumeMounts:
         - name: migrations
           mountPath: /migrations
@@ -57,7 +57,7 @@ spec:
       - name: migrate
         image: codefactory/langgraph-service:dev
         imagePullPolicy: Always
-        command: [ "python", "-m", "langgraph_service.migrate" ]
+        command: [ "python", "-m", "langgraph_service.storage.migrate" ]
         envFrom:
         - configMapRef:
             name: codefactory-database-config

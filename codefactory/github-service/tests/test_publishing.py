@@ -52,7 +52,11 @@ class FakeGitHub:
             "is_archived": False,
             "status_option_name": self.status,
             "done_option_name": "Done",
-            "issue": {"repository": self.issue_repository, "state": "OPEN"},
+            "issue": {
+                "number": 17,
+                "repository": self.issue_repository,
+                "state": "OPEN",
+            },
         }
 
     def get_repository(self, repository, installation_id):
@@ -145,6 +149,24 @@ class FakeGitHub:
         self.pull_requests.append(result)
         return result
 
+    def update_pull_request_body(self, repository, number, body, installation_id):
+        self.calls.append(("update_pr_body", repository, number, installation_id))
+        pull_request = next(pr for pr in self.pull_requests if pr["number"] == number)
+        pull_request["body"] = body
+        return pull_request
+
+    def get_pull_request_ci(self, repository, pull_request_number, installation_id):
+        self.calls.append(("get_ci", repository, pull_request_number, installation_id))
+        pull_request = next(
+            pr for pr in self.pull_requests if pr["number"] == pull_request_number
+        )
+        return {
+            "pull_request_id": pull_request["pull_request_id"],
+            "head_sha": self.refs[pull_request["head"]],
+            "ci_checks": [],
+            "ci_complete": True,
+        }
+
 
 def _store(tmp_path, task_id="task-1"):
     store = SQLiteDeliveryStore(tmp_path / "github.sqlite")
@@ -195,8 +217,39 @@ def test_proposal_creates_deterministic_branch_and_one_pull_request(tmp_path):
     assert ("create_ref", branch, "commit-1") in github.calls
     assert ("create_pr", "example/project", branch, "main", 654) in github.calls
     assert result["pull_request_id"] == "9001"
+    assert result["head_sha"] == "commit-1"
+    assert result["ci_head_sha"] == "commit-1"
+    assert result["ci_checks"] == []
+    assert result["ci_complete"] is True
     assert "## Advisory risk summary" not in github.pull_requests[0]["body"]
+    assert "Closes example/project#17" in github.pull_requests[0]["body"]
     assert store.task_for_pull_request("example/project", 17) == "task-1"
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("existing_body", "expected_body"),
+    [
+        (
+            "Human-authored PR notes.",
+            "Human-authored PR notes.\n\nCloses example/project#17",
+        ),
+        (None, "Closes example/project#17"),
+    ],
+)
+def test_republishing_links_existing_pull_request_without_replacing_body(
+    tmp_path, existing_body, expected_body
+):
+    store = _store(tmp_path)
+    github = FakeGitHub()
+    publisher = GitHubTaskPublisher(store=store, github=github)
+    publisher.publish(_proposal(changes=_change("create", "src/task.py", "first\n")))
+    github.pull_requests[0]["body"] = existing_body
+
+    publisher.publish(_proposal(changes=_change("update", "src/task.py", "second\n")))
+
+    assert github.pull_requests[0]["body"] == expected_body
+    assert [call[0] for call in github.calls].count("update_pr_body") == 1
     store.close()
 
 

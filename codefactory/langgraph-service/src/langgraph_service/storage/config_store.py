@@ -44,7 +44,7 @@ class PostgresAgentConfigStore:
             return AgentConfigSnapshot(AgentConfig(), 0, None, None)
         return AgentConfigSnapshot(
             config=AgentConfig(
-                completion_timeout_seconds=row["completion_timeout_seconds"]
+                completion_timeout_seconds=row["completion_timeout_seconds"],
             ),
             version=row["version"],
             updated_at=row["updated_at"],
@@ -64,19 +64,21 @@ class PostgresAgentConfigStore:
         ):
             cursor.execute(
                 "INSERT INTO langgraph_service.agent_config "
-                "(id, completion_timeout_seconds, version, updated_at, updated_by) "
+                "(id, completion_timeout_seconds, version, "
+                "updated_at, updated_by) "
                 "VALUES (1, %s, 1, now(), %s) "
                 "ON CONFLICT (id) DO UPDATE SET "
                 "completion_timeout_seconds = EXCLUDED.completion_timeout_seconds, "
                 "version = langgraph_service.agent_config.version + 1, "
                 "updated_at = now(), updated_by = EXCLUDED.updated_by "
-                "RETURNING completion_timeout_seconds, version, updated_at, updated_by",
+                "RETURNING completion_timeout_seconds, version, "
+                "updated_at, updated_by",
                 (config.completion_timeout_seconds, updated_by),
             )
             row = cursor.fetchone()
         return AgentConfigSnapshot(
             config=AgentConfig(
-                completion_timeout_seconds=row["completion_timeout_seconds"]
+                completion_timeout_seconds=row["completion_timeout_seconds"],
             ),
             version=row["version"],
             updated_at=row["updated_at"],

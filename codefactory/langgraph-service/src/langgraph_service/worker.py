@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Protocol
 
-from langgraph_service.service import TaskLifecycle
+from langgraph_service.workflow.service import TaskLifecycle
 
 
 class GitHubEventQueue(Protocol):
@@ -15,7 +15,13 @@ class GitHubEventQueue(Protocol):
 
     def retry_event(self, event_id: str, claim_token: str, error: str) -> None: ...
 
-    def complete_task(self, task_id: str) -> dict[str, object]: ...
+    def complete_task(
+        self,
+        task_id: str,
+        no_ci_resolution: Mapping[str, object] | None = None,
+    ) -> dict[str, object]: ...
+
+    def start_task(self, task_id: str) -> dict[str, object]: ...
 
 
 class LangGraphEventWorker:
@@ -55,9 +61,17 @@ class LangGraphEventWorker:
             task_id = event_input.get("task_id")
             if not isinstance(task_id, str) or not task_id:
                 raise ValueError("queued event is missing task_id")
+            if event_input.get("event_type") == "ready":
+                started = self._queue.start_task(task_id)
+                if started.get("started") is not True:
+                    raise RuntimeError("GitHub has not confirmed task activation")
             result = self._lifecycle.invoke(event_input)
             if result.get("event_status") == "completion_requested":
-                completion = self._queue.complete_task(task_id)
+                resolution = result.get("no_ci_resolution")
+                completion = self._queue.complete_task(
+                    task_id,
+                    resolution if isinstance(resolution, Mapping) else None,
+                )
                 if completion.get("completed") is not True:
                     raise RuntimeError("GitHub has not confirmed task completion")
                 self._lifecycle.invoke(

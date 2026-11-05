@@ -14,6 +14,10 @@ from management_portal.auth import (
     GITHUB_ORGANIZATION,
 )
 from management_portal.host import create_app
+from management_portal.preview import (
+    _is_loopback_client,
+    create_app as create_preview_app,
+)
 from management_portal.settings import GITHUB_OAUTH_CALLBACK_URL, PortalSettings
 
 OAUTH_CLIENT_SECRET = "oauth-client-secret-marker"
@@ -23,7 +27,7 @@ WORKFLOW_SCHEMA_PATH = (
     Path(__file__).resolve().parents[2]
     / "contracts"
     / "openapi"
-    / "github-service.json"
+    / "management-portal.json"
 )
 
 
@@ -37,17 +41,7 @@ def _create_app(tmp_path, *, oauth=True):
     app = create_app(settings=settings)
     app.state.oauth_http_transport = httpx.MockTransport(_oauth_response)
     app.state.github_http_transport = httpx.MockTransport(_github_response)
-    app.state.langgraph_http_transport = httpx.MockTransport(
-        lambda _request: httpx.Response(
-            200,
-            json={
-                "config": {"completion_timeout_seconds": 45},
-                "version": 0,
-                "updated_at": None,
-                "updated_by": None,
-            },
-        )
-    )
+    app.state.langgraph_http_transport = httpx.MockTransport(_langgraph_response)
     return app
 
 
@@ -70,6 +64,22 @@ def _workflow_summary(**overrides):
         "ci_complete": None,
     }
     return {**summary, **overrides}
+
+
+def _langgraph_response(request):
+    if request.url.path == "/internal/management/executions":
+        return httpx.Response(200, json={"executions": []})
+    return httpx.Response(
+        200,
+        json={
+            "config": {
+                "completion_timeout_seconds": 45,
+            },
+            "version": 0,
+            "updated_at": None,
+            "updated_by": None,
+        },
+    )
 
 
 def _github_response(request):
@@ -116,6 +126,51 @@ def _login(client):
     return login_response, callback_response
 
 
+def _login_as_owner(client, app):
+    def owner_oauth_response(request):
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
+            return httpx.Response(
+                200,
+                json={
+                    "state": "active",
+                    "role": "admin",
+                    "organization": {"login": GITHUB_ORGANIZATION},
+                },
+            )
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "verified-owner"})
+        return _oauth_response(request)
+
+    app.state.oauth_http_transport = httpx.MockTransport(owner_oauth_response)
+    return _login(client)
+
+
+def _roster_payload():
+    profiles = [
+        ("context", "gather_context"),
+        ("planning", "create_plan"),
+        ("risk", "assess_risk"),
+        ("implementation", "prepare_changes"),
+        ("repair", "repair_changes"),
+    ]
+    agents = [
+        {
+            "agent_id": role,
+            "name": role.title(),
+            "description": f"{role} profile",
+            "prompt_content": "",
+            "model_profile": "local_llama_cpp",
+            "skill_ids": ["review_notes"] if role == "context" else [],
+            "tool_profile": tool_profile,
+        }
+        for role, tool_profile in profiles
+    ]
+    return {
+        "agents": agents,
+        "assignments": {role: role for role, _ in profiles},
+    }
+
+
 def _set_cookie(response, name):
     return next(
         value
@@ -154,7 +209,9 @@ def test_workflow_dashboard_api_exposes_safe_summary_only(tmp_path):
     contract = json.loads(WORKFLOW_SCHEMA_PATH.read_text())
     summary_schema = contract["components"]["schemas"]["WorkflowSummary"]
     Draft202012Validator(summary_schema).validate(workflows[0])
-    assert workflows == [private_summary]
+    assert workflows == [
+        {**private_summary, "workflow_status": None, "waiting_for": None}
+    ]
     assert "private-issue-body-marker" not in response.text
     assert "private-error-detail-marker" not in response.text
     assert OAUTH_CLIENT_SECRET not in response.text
@@ -192,6 +249,329 @@ def test_workflow_dashboard_reports_observed_ci_and_merge_status(tmp_path):
     assert workflow["ci_complete"] is True
 
 
+def test_review_changes_requested_workflow_is_projected_and_labeled(tmp_path):
+    app = _create_app(tmp_path)
+    summary = _workflow_summary(latest_event="review_changes_requested")
+    app.state.github_http_transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"workflows": [summary]})
+    )
+
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        response = client.get("/api/workflows")
+        script = client.get("/management-portal/assets/portal.js")
+
+    assert response.status_code == 200
+    workflow = response.json()["workflows"][0]
+    contract = json.loads(WORKFLOW_SCHEMA_PATH.read_text())
+    summary_schema = contract["components"]["schemas"]["WorkflowSummary"]
+    Draft202012Validator(summary_schema).validate(workflow)
+    assert workflow["latest_event"] == "review_changes_requested"
+    assert "review_changes_requested: 'Review changes requested'" in script.text
+    assert "repair_unresolved: 'Needs reviewer feedback'" in script.text
+    assert "human_feedback: 'human feedback'" in script.text
+    assert "readableState(workflow.latest_event, latestEventLabels)" in script.text
+
+
+def test_workflow_dashboard_projects_lifecycle_separately_from_queue_status(tmp_path):
+    app = _create_app(tmp_path)
+    summary = _workflow_summary(
+        task_id="PVTI_lADOE2vr3s4BpgD7zhFiGco",
+        latest_event="review_changes_requested",
+        status="processed",
+    )
+    app.state.github_http_transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"workflows": [summary]})
+    )
+    execution_requests = []
+
+    def langgraph_response(request):
+        if request.url.path == "/internal/management/executions":
+            execution_requests.append(request)
+            return httpx.Response(
+                200,
+                json={
+                    "executions": [
+                        {
+                            "thread_id": summary["task_id"],
+                            "workflow_status": "repair_unresolved",
+                            "waiting_for": "human_feedback",
+                        }
+                    ]
+                },
+            )
+        return _langgraph_response(request)
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        response = client.get("/api/workflows")
+        dashboard = client.get("/")
+        script = client.get("/management-portal/assets/portal.js")
+
+    assert response.status_code == 200
+    workflow = response.json()["workflows"][0]
+    assert workflow["workflow_status"] == "repair_unresolved"
+    assert workflow["waiting_for"] == "human_feedback"
+    assert workflow["status"] == "processed"
+    assert len(execution_requests) == 1
+    assert execution_requests[0].url.params["limit"] == "100"
+    assert "<th>Workflow status</th>" in dashboard.text
+    assert "<th>Waiting for</th>" in dashboard.text
+    assert "<th>Queue status</th>" in dashboard.text
+    assert "repair_unresolved: 'Needs reviewer feedback'" in script.text
+    assert "human_feedback: 'human feedback'" in script.text
+    assert "const queueStatus = cell(row," in script.text
+    assert "workflow.workflow_status === 'repair_unresolved'" in script.text
+    assert (
+        "if (workflow.workflow_status === 'repair_unresolved') appendReviewLink(lifecycleStatus, workflow);"
+        in script.text
+    )
+    assert (
+        "pullRequestUrl(workflow.repository, workflow.pull_request_number)"
+        in script.text
+    )
+    assert "function appendReviewLink(target, workflow)" in script.text
+    link_helper = script.text.split("function appendReviewLink(target, workflow) {", 1)[
+        1
+    ].split("\n}", 1)[0]
+    assert "workflow.workflow_status" not in link_helper
+    assert "appendReviewLink(lifecycleStatus, workflow)" in script.text
+    assert (
+        "appendReviewLink(executionStatus, workflowsByTaskId.get(execution.thread_id))"
+        in script.text
+    )
+    assert "reviewLink.textContent = 'Review feedback'" in script.text
+    assert "reviewLink.href = reviewUrl" in script.text
+    assert (
+        "https://github.com/${repositoryParts.map(encodeURIComponent).join('/')}/pull/${pullRequestNumber}"
+        in script.text
+    )
+
+
+def test_execution_flow_distinguishes_unresolved_repair_from_merge_wait(tmp_path):
+    app = _create_app(tmp_path)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        script = client.get("/management-portal/assets/portal.js")
+
+    assert script.status_code == 200
+    assert "human_feedback: 'repair'" in script.text
+    assert "typeof checkpoint.event_type === 'string'" in script.text
+    assert "checkpoint.event_type === newerCheckpoint.event_type" in script.text
+    assert "newerCheckpoint.step > checkpoint.step" in script.text
+    assert "latest.workflow_status === 'repair_unresolved'" in script.text
+    assert "latest.waiting_for === 'human_feedback'" in script.text
+    assert "status = 'Needs reviewer feedback'" in script.text
+    assert (
+        "appendReviewLink(nodeStatus, workflowsByTaskId.get(detail.thread_id))"
+        in script.text
+    )
+    assert "Clarify the requested changes in a new review to continue." in script.text
+    assert "human_merge: 'human_merge_boundary'" in script.text
+    assert script.text.index("else if (waitingNode === nodeId)") < script.text.index(
+        "else if (completedNodes.has(nodeId))"
+    )
+    assert "awaiting_human_merge: 'Waiting for a human merge'" in script.text
+
+
+def test_execution_flow_shows_completed_stages_and_current_phase_only(tmp_path):
+    app = _create_app(tmp_path)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        script = client.get("/management-portal/assets/portal.js")
+
+    assert script.status_code == 200
+    assert "status = 'Complete'" in script.text
+    assert (
+        "if (!['complete', 'waiting', 'stopped'].includes(statusClass)) continue;"
+        in script.text
+    )
+    assert "if (visibleNodeIds.has(nodeId)) continue;" in script.text
+    assert "if (!list.children.length) continue;" in script.text
+    assert "Not reached" not in script.text
+    assert "Up next" not in script.text
+
+
+def test_workflow_dashboard_caps_workflow_summaries_at_100(tmp_path):
+    app = _create_app(tmp_path)
+    summaries = [_workflow_summary(task_id=f"task-{index}") for index in range(101)]
+    app.state.github_http_transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"workflows": summaries})
+    )
+
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        response = client.get("/api/workflows")
+
+    assert response.status_code == 200
+    workflows = response.json()["workflows"]
+    assert len(workflows) == 100
+    assert workflows[0]["task_id"] == "task-0"
+    assert workflows[-1]["task_id"] == "task-99"
+
+
+def test_workflow_retry_requires_owner_and_same_origin(tmp_path):
+    app = _create_app(tmp_path)
+    github_requests = []
+
+    def github_response(request):
+        github_requests.append(request)
+        return httpx.Response(200, json={"requeued": True})
+
+    app.state.github_http_transport = httpx.MockTransport(github_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        member_retry = client.post(
+            "/api/workflows/PVTI_safe-task-id/retry",
+            headers={"origin": "https://testserver"},
+        )
+
+    assert member_retry.status_code == 403
+    assert github_requests == []
+
+    def owner_oauth_response(request):
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
+            return httpx.Response(
+                200,
+                json={
+                    "state": "active",
+                    "role": "admin",
+                    "organization": {"login": GITHUB_ORGANIZATION},
+                },
+            )
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "verified-owner"})
+        return _oauth_response(request)
+
+    app = _create_app(tmp_path)
+    app.state.oauth_http_transport = httpx.MockTransport(owner_oauth_response)
+    app.state.github_http_transport = httpx.MockTransport(github_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        cross_origin = client.post(
+            "/api/workflows/PVTI_safe-task-id/retry",
+            headers={"origin": "https://attacker.example"},
+        )
+        retried = client.post(
+            "/api/workflows/PVTI_safe-task-id/retry",
+            headers={"origin": "https://testserver"},
+        )
+
+    assert cross_origin.status_code == 403
+    assert retried.status_code == 200
+    assert retried.json() == {"requeued": True}
+    assert len(github_requests) == 1
+    assert github_requests[0].method == "POST"
+    assert github_requests[0].url.path == (
+        "/internal/management/workflows/PVTI_safe-task-id/retry"
+    )
+    assert github_requests[0].headers["Authorization"] == (
+        "Bearer portal-internal-service-token"
+    )
+
+
+def test_workflow_retry_hides_upstream_failure_details(tmp_path):
+    app = _create_app(tmp_path)
+    sensitive_error = "private-upstream-error-marker"
+
+    def owner_oauth_response(request):
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
+            return httpx.Response(
+                200,
+                json={
+                    "state": "active",
+                    "role": "admin",
+                    "organization": {"login": GITHUB_ORGANIZATION},
+                },
+            )
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "verified-owner"})
+        return _oauth_response(request)
+
+    app.state.oauth_http_transport = httpx.MockTransport(owner_oauth_response)
+    app.state.github_http_transport = httpx.MockTransport(
+        lambda _request: httpx.Response(409, text=sensitive_error)
+    )
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        response = client.post(
+            "/api/workflows/PVTI_safe-task-id/retry",
+            headers={"origin": "https://testserver"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "workflow is not eligible for retry"}
+    assert sensitive_error not in response.text
+
+
+def test_no_ci_resolution_requires_owner_and_same_origin(tmp_path):
+    app = _create_app(tmp_path)
+    forwarded = []
+
+    def owner_oauth_response(request):
+        if request.url.path == f"/user/memberships/orgs/{GITHUB_ORGANIZATION}":
+            return httpx.Response(
+                200,
+                json={
+                    "state": "active",
+                    "role": "admin",
+                    "organization": {"login": GITHUB_ORGANIZATION},
+                },
+            )
+        if request.url.path == "/user":
+            return httpx.Response(200, json={"login": "verified-owner"})
+        return _oauth_response(request)
+
+    def langgraph_response(request):
+        forwarded.append(request)
+        return httpx.Response(200, json={"resolved": True})
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        member = client.post(
+            "/api/executions/PVTI_safe-task-id/resolve-no-ci",
+            headers={"origin": "https://testserver"},
+        )
+
+    assert member.status_code == 403
+    assert forwarded == []
+
+    app = _create_app(tmp_path)
+    app.state.oauth_http_transport = httpx.MockTransport(owner_oauth_response)
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        cross_origin = client.post(
+            "/api/executions/PVTI_safe-task-id/resolve-no-ci",
+            headers={"origin": "https://attacker.example"},
+        )
+        resolved = client.post(
+            "/api/executions/PVTI_safe-task-id/resolve-no-ci",
+            headers={"origin": "https://testserver"},
+        )
+
+    assert cross_origin.status_code == 403
+    assert resolved.status_code == 200
+    assert resolved.json() == {"resolved": True}
+    assert len(forwarded) == 1
+    assert forwarded[0].method == "POST"
+    assert forwarded[0].url.path == (
+        "/internal/management/executions/PVTI_safe-task-id/resolve-no-ci"
+    )
+    assert forwarded[0].headers["Authorization"] == (
+        "Bearer portal-internal-service-token"
+    )
+    assert json.loads(forwarded[0].content) == {
+        "actor": "verified-owner",
+        "decision": "proceed_without_ci",
+    }
+
+
 def test_workflow_dashboard_page_is_served_by_management_portal(tmp_path):
     app = _create_app(tmp_path)
 
@@ -199,19 +579,70 @@ def test_workflow_dashboard_page_is_served_by_management_portal(tmp_path):
         _, callback_response = _login(client)
         assert callback_response.status_code == 303
         response = client.get("/")
+        settings_page = client.get("/settings")
 
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Codefactory workflow state" in response.text
     assert "/management-portal/assets/portal.css" in response.text
     assert "/management-portal/assets/portal.js" in response.text
+    assert 'id="live-status"' in response.text
+    assert "/settings" in response.text
+    assert 'href="/" aria-current="page"' in response.text
+    assert "agent-config-form" not in response.text
+    assert settings_page.status_code == 200
+    assert "Agent configuration" in settings_page.text
+    assert 'href="/settings" aria-current="page"' in settings_page.text
+    assert "agent-config-form" in settings_page.text
+    assert 'id="gpu-model-filename"' in settings_page.text
+    assert 'id="cpu-model-filename"' in settings_page.text
+    assert 'id="gpu-model-url"' in settings_page.text
+    assert 'id="cpu-model-url"' in settings_page.text
+    assert 'id="gpu-model-sha256"' in settings_page.text
+    assert 'id="cpu-model-sha256"' in settings_page.text
+    assert 'id="inference-metrics-body"' in settings_page.text
+    assert 'id="model-profile"' not in settings_page.text
+    assert "/management-portal/assets/settings.js" in settings_page.text
+    assert 'id="roster-summary"' in settings_page.text
+    assert 'id="add-profile-role"' in settings_page.text
+    assert 'id="roster-document"' not in settings_page.text
 
     script = client.get("/management-portal/assets/portal.js")
+    settings_script = client.get("/management-portal/assets/settings.js")
     stylesheet = client.get("/management-portal/assets/portal.css")
-    assert script.status_code == stylesheet.status_code == 200
+    assert (
+        script.status_code
+        == settings_script.status_code
+        == stylesheet.status_code
+        == 200
+    )
+    assert "data-role-assignment" in settings_script.text
+    assert "createProfileEditor" in settings_script.text
+    assert "Save roster" in settings_page.text
+    assert ".settings-page :focus-visible" in stylesheet.text
     assert "No workflow records are available yet." in script.text
     assert "Workflow state is unavailable." in script.text
     assert "fetch('/api/workflows'" in script.text
+    assert "window.setInterval" in script.text
+    assert "refreshIntervalMs = 5000" in script.text
+    assert "visibilitychange" in script.text
+    assert "cache: 'no-store'" in script.text
+    assert "workflowFlowNodes" in script.text
+    assert "workflowFlowLanes" in script.text
+    assert "No CI result received yet" in script.text
+    assert "Waiting for a human merge" in script.text
+    assert "Completed" in script.text
+    assert "renderExecutionFlow" in script.text
+    assert "flow-node-status" in script.text
+    assert "CI failure" in script.text
+    assert "human-merge boundary" in script.text
+    assert "flow-lane-nodes" in stylesheet.text
+    assert "workflow.status === 'failed'" in script.text
+    assert "/api/workflows/" in script.text
+    assert "No CI checks found: operator decision required" in script.text
+    assert "Proceed without CI" in script.text
+    assert "resolve-no-ci" in script.text
+    assert "Operator decision:" in script.text
     assert "#f3f6f5" in stylesheet.text
 
 
@@ -220,10 +651,13 @@ def test_dashboard_and_api_require_a_valid_session(tmp_path):
 
     with TestClient(app, base_url="https://testserver") as client:
         dashboard = client.get("/", follow_redirects=False)
+        settings_page = client.get("/settings", follow_redirects=False)
         api = client.get("/api/workflows")
 
     assert dashboard.status_code == 303
     assert dashboard.headers["location"] == "/auth/login"
+    assert settings_page.status_code == 303
+    assert settings_page.headers["location"] == "/auth/login"
     assert api.status_code == 401
 
 
@@ -254,7 +688,9 @@ def test_only_verified_organization_owner_can_update_agent_config(tmp_path):
             return httpx.Response(
                 200,
                 json={
-                    "config": {"completion_timeout_seconds": 45},
+                    "config": {
+                        "completion_timeout_seconds": 45,
+                    },
                     "version": 0,
                     "updated_at": None,
                     "updated_by": None,
@@ -269,7 +705,9 @@ def test_only_verified_organization_owner_can_update_agent_config(tmp_path):
             return httpx.Response(
                 200,
                 json={
-                    "config": {"completion_timeout_seconds": 60},
+                    "config": {
+                        "completion_timeout_seconds": 60,
+                    },
                     "version": 1,
                     "updated_at": "2026-11-02T12:00:00+00:00",
                     "updated_by": "verified-owner",
@@ -302,6 +740,7 @@ def test_only_verified_organization_owner_can_update_agent_config(tmp_path):
                             "created_at": "2026-11-02T12:00:00Z",
                             "step": 2,
                             "workflow_status": "awaiting_ci",
+                            "next_nodes": ["await_ci"],
                         }
                     ],
                 },
@@ -317,17 +756,24 @@ def test_only_verified_organization_owner_can_update_agent_config(tmp_path):
         secret_config = client.put(
             "/api/agent-config",
             headers={"Origin": "https://testserver"},
-            json={"completion_timeout_seconds": 60, "api_key": "secret-marker"},
+            json={
+                "completion_timeout_seconds": 60,
+                "api_key": "secret-marker",
+            },
         )
         cross_origin_update = client.put(
             "/api/agent-config",
             headers={"Origin": "https://attacker.example"},
-            json={"completion_timeout_seconds": 60},
+            json={
+                "completion_timeout_seconds": 60,
+            },
         )
         updated = client.put(
             "/api/agent-config",
             headers={"Origin": "https://testserver"},
-            json={"completion_timeout_seconds": 60},
+            json={
+                "completion_timeout_seconds": 60,
+            },
         )
         executions = client.get("/api/executions")
         detail = client.get("/api/executions/task-safe")
@@ -340,10 +786,165 @@ def test_only_verified_organization_owner_can_update_agent_config(tmp_path):
     assert updated.json()["updated_by"] == "verified-owner"
     assert executions.json()["executions"][0]["workflow_status"] == "awaiting_ci"
     assert detail.json()["checkpoints"][0]["step"] == 2
+    assert detail.json()["checkpoints"][0]["next_nodes"] == ["await_ci"]
     assert len(requests) == 4
     assert "portal-internal-service-token" not in (
         config.text + updated.text + executions.text + detail.text
     )
+
+
+def test_owner_can_view_and_update_agent_roster_through_portal(tmp_path):
+    app = _create_app(tmp_path)
+    requests = []
+    current_roster = _roster_payload()
+    updated_roster = _roster_payload()
+    updated_roster["agents"][0]["description"] = "Updated context profile"
+
+    def langgraph_response(request):
+        requests.append(request)
+        assert request.headers["Authorization"] == (
+            "Bearer portal-internal-service-token"
+        )
+        if request.url.path.endswith("/agent-roster") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "roster": current_roster,
+                    "revision": 4,
+                    "updated_at": "2026-11-02T12:00:00+00:00",
+                    "updated_by": "previous-owner",
+                },
+            )
+        if request.url.path.endswith("/agent-roster") and request.method == "PUT":
+            payload = json.loads(request.content)
+            assert payload == {
+                "roster": updated_roster,
+                "expected_revision": 4,
+                "updated_by": "verified-owner",
+            }
+            return httpx.Response(
+                200,
+                json={
+                    "roster": updated_roster,
+                    "revision": 5,
+                    "updated_at": "2026-11-03T12:00:00+00:00",
+                    "updated_by": "verified-owner",
+                },
+            )
+        return httpx.Response(404)
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _, callback_response = _login_as_owner(client, app)
+        page = client.get("/settings")
+        current = client.get("/api/agent-roster")
+        cross_origin = client.put(
+            "/api/agent-roster",
+            headers={"Origin": "https://attacker.example"},
+            json={"roster": updated_roster, "expected_revision": 4},
+        )
+        updated = client.put(
+            "/api/agent-roster",
+            headers={"Origin": "https://testserver"},
+            json={"roster": updated_roster, "expected_revision": 4},
+        )
+
+    assert callback_response.status_code == 303
+    assert page.status_code == 200
+    assert "Agent roster" in page.text
+    assert "metadata only" in page.text
+    assert current.status_code == 200
+    assert current.json()["can_edit"] is True
+    assert current.json()["revision"] == 4
+    assert current.json()["roster"] == current_roster
+    assert cross_origin.status_code == 403
+    assert updated.status_code == 200
+    assert updated.json()["revision"] == 5
+    assert updated.json()["updated_by"] == "verified-owner"
+    assert [request.method for request in requests] == ["GET", "PUT"]
+    assert "portal-internal-service-token" not in current.text + updated.text
+
+
+def test_active_member_cannot_update_agent_roster(tmp_path):
+    app = _create_app(tmp_path)
+    forwarded = []
+    roster = _roster_payload()
+
+    def langgraph_response(request):
+        forwarded.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "roster": roster,
+                "revision": 1,
+                "updated_at": None,
+                "updated_by": None,
+            },
+        )
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _, callback_response = _login(client)
+        current = client.get("/api/agent-roster")
+        update = client.put(
+            "/api/agent-roster",
+            headers={"Origin": "https://testserver"},
+            json={"roster": roster, "expected_revision": 1},
+        )
+
+    assert callback_response.status_code == 303
+    assert current.status_code == 200
+    assert current.json()["can_edit"] is False
+    assert update.status_code == 403
+    assert [request.method for request in forwarded] == ["GET"]
+
+
+def test_agent_roster_maps_validation_conflict_and_service_errors(tmp_path):
+    app = _create_app(tmp_path)
+    requests = []
+
+    def langgraph_response(request):
+        requests.append(request)
+        if request.method == "PUT" and len(requests) == 1:
+            return httpx.Response(409, json={"detail": "private conflict detail"})
+        if request.method == "PUT":
+            return httpx.Response(422, json={"detail": "private validation detail"})
+        return httpx.Response(503, json={"detail": "private service detail"})
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login_as_owner(client, app)
+        roster = _roster_payload()
+        invalid_roster = _roster_payload()
+        invalid_roster["agents"][0]["tool_profile"] = "shell"
+        invalid = client.put(
+            "/api/agent-roster",
+            headers={"Origin": "https://testserver"},
+            json={"roster": invalid_roster, "expected_revision": 0},
+        )
+        conflict = client.put(
+            "/api/agent-roster",
+            headers={"Origin": "https://testserver"},
+            json={"roster": roster, "expected_revision": 0},
+        )
+        rejected = client.put(
+            "/api/agent-roster",
+            headers={"Origin": "https://testserver"},
+            json={"roster": roster, "expected_revision": 0},
+        )
+        unavailable = client.get("/api/agent-roster")
+
+    assert invalid.status_code == 422
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "agent roster changed; reload before saving"
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == (
+        "agent roster was rejected by the workflow service"
+    )
+    assert unavailable.status_code == 503
+    assert unavailable.json()["detail"] == "workflow service unavailable"
+    assert "private" not in conflict.text + rejected.text + unavailable.text
+    assert len(requests) == 3
 
 
 def test_active_member_cannot_save_agent_config(tmp_path):
@@ -355,7 +956,9 @@ def test_active_member_cannot_save_agent_config(tmp_path):
             or httpx.Response(
                 200,
                 json={
-                    "config": {"completion_timeout_seconds": 45},
+                    "config": {
+                        "completion_timeout_seconds": 45,
+                    },
                     "version": 0,
                     "updated_at": None,
                     "updated_by": None,
@@ -370,7 +973,9 @@ def test_active_member_cannot_save_agent_config(tmp_path):
         update = client.put(
             "/api/agent-config",
             headers={"Origin": "https://testserver"},
-            json={"completion_timeout_seconds": 60},
+            json={
+                "completion_timeout_seconds": 60,
+            },
         )
 
     assert callback_response.status_code == 303
@@ -403,6 +1008,176 @@ def test_unverifiable_github_owner_role_fails_closed(tmp_path):
         value.startswith("codefactory_dashboard_session=")
         for value in callback_response.headers.get_list("set-cookie")
     )
+
+
+def test_local_preview_serves_live_data_without_auth_and_blocks_writes():
+    settings = PortalSettings(
+        internal_service_token="portal-preview-service-token",
+        github_service_url="http://github-service",
+        langgraph_service_url="http://langgraph-service",
+    )
+    app = create_preview_app(settings)
+    github_requests = []
+    langgraph_requests = []
+
+    def github_response(request):
+        github_requests.append(request)
+        return httpx.Response(
+            200,
+            json={"workflows": [_workflow_summary(status="processing")]},
+        )
+
+    def langgraph_response(request):
+        langgraph_requests.append(request)
+        if request.url.path.endswith("/agent-config"):
+            return httpx.Response(
+                200,
+                json={
+                    "config": {
+                        "completion_timeout_seconds": 45,
+                    },
+                    "version": 2,
+                    "updated_at": None,
+                    "updated_by": None,
+                },
+            )
+        if request.url.path.endswith("/agent-roster"):
+            return httpx.Response(
+                200,
+                json={
+                    "roster": _roster_payload(),
+                    "revision": 3,
+                    "updated_at": None,
+                    "updated_by": "preview-owner",
+                },
+            )
+        if request.url.path.endswith("/executions"):
+            return httpx.Response(
+                200,
+                json={
+                    "executions": [
+                        {
+                            "thread_id": "live-task",
+                            "checkpoint_id": "checkpoint-2",
+                            "created_at": "2026-11-02T12:05:00Z",
+                            "step": 2,
+                            "workflow_status": "running",
+                            "waiting_for": None,
+                            "task_status": "running",
+                            "event_type": "projects_v2_item",
+                            "event_status": "processing",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "thread_id": "live-task",
+                "checkpoints": [
+                    {
+                        "thread_id": "live-task",
+                        "checkpoint_id": "checkpoint-2",
+                        "created_at": "2026-11-02T12:05:00Z",
+                        "step": 2,
+                        "workflow_status": "running",
+                        "waiting_for": None,
+                        "task_status": "running",
+                        "event_type": "projects_v2_item",
+                        "event_status": "processing",
+                    }
+                ],
+            },
+        )
+
+    app.state.github_http_transport = httpx.MockTransport(github_response)
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+
+    with TestClient(app) as client:
+        dashboard = client.get("/")
+        settings_page = client.get("/settings")
+        stylesheet = client.get("/management-portal/assets/portal.css")
+        script = client.get("/management-portal/assets/portal.js")
+        settings_script = client.get("/management-portal/assets/settings.js")
+        workflows = client.get("/api/workflows")
+        config = client.get("/api/agent-config")
+        roster = client.get("/api/agent-roster")
+        executions = client.get("/api/executions")
+        detail = client.get("/api/executions/live-task")
+        updated = client.put(
+            "/api/agent-config",
+            json={
+                "completion_timeout_seconds": 60,
+            },
+        )
+        updated_roster = client.put(
+            "/api/agent-roster",
+            json={"roster": _roster_payload(), "expected_revision": 3},
+        )
+
+    assert dashboard.status_code == 200
+    assert "Codefactory workflow state" in dashboard.text
+    assert settings_page.status_code == 200
+    assert "agent-config-form" in settings_page.text
+    assert stylesheet.status_code == script.status_code == 200
+    assert settings_script.status_code == 200
+    assert "/api/agent-config" in settings_script.text
+    assert "Local preview; live backend data is read-only." in settings_script.text
+    assert workflows.json()["workflows"][0]["task_id"] == "PVTI_safe-task-id"
+    assert workflows.json()["workflows"][0]["status"] == "processing"
+    assert config.json()["preview"] is True
+    assert config.json()["can_edit"] is False
+    assert config.json()["version"] == 2
+    assert roster.status_code == 200
+    assert roster.json()["revision"] == 3
+    assert roster.json()["can_edit"] is False
+    assert roster.json()["preview"] is True
+    assert executions.json()["executions"][0]["workflow_status"] == "running"
+    assert detail.json()["thread_id"] == "live-task"
+    assert updated.status_code == 403
+    assert updated_roster.status_code == 403
+    assert [request.method for request in github_requests] == ["GET"]
+    assert [request.method for request in langgraph_requests] == ["GET"] * 4
+    assert all(
+        request.headers["Authorization"] == "Bearer portal-preview-service-token"
+        for request in github_requests + langgraph_requests
+    )
+
+
+def test_local_preview_revalidates_dashboard_and_review_link_bundle():
+    app = create_preview_app(PortalSettings())
+
+    with TestClient(app) as client:
+        dashboard = client.get("/")
+        script = client.get("/management-portal/assets/portal.js")
+
+    assert dashboard.status_code == 200
+    assert script.status_code == 200
+    assert dashboard.headers["cache-control"] == "no-cache"
+    assert script.headers["cache-control"] == "no-cache"
+    assert (
+        "appendReviewLink(executionStatus, workflowsByTaskId.get(execution.thread_id))"
+        in script.text
+    )
+    assert "reviewLink.textContent = 'Review feedback'" in script.text
+    assert "reviewLink.href = reviewUrl" in script.text
+
+
+def test_local_preview_fails_closed_without_internal_service_token():
+    app = create_preview_app(PortalSettings())
+    with TestClient(app) as client:
+        workflows = client.get("/api/workflows")
+    assert workflows.status_code == 503
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1", "testclient"])
+def test_local_preview_allows_loopback_clients(host):
+    assert _is_loopback_client(host)
+
+
+@pytest.mark.parametrize("host", [None, "192.0.2.10", "localhost"])
+def test_local_preview_rejects_non_loopback_clients(host):
+    assert not _is_loopback_client(host)
 
 
 @pytest.mark.parametrize("role", [None, "sensitive-role-marker", 1, [], {}])
@@ -640,3 +1415,211 @@ def test_inactive_or_incorrect_organization_membership_is_denied(tmp_path, caplo
         for sensitive_value in (OAUTH_CLIENT_SECRET, OAUTH_ACCESS_TOKEN, state):
             assert sensitive_value not in caplog.text
         assert "authorization-code" not in caplog.text
+
+
+def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_path):
+    app = _create_app(tmp_path)
+    forwarded = []
+
+    def langgraph_response(request):
+        forwarded.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "instances": [
+                        {
+                            "config": {
+                                "instance_id": "gpu",
+                                "model_filename": "qwen2.5-32b-instruct-q4_k_m.gguf",
+                                "download_status": "ready",
+                                "rollout_status": "pending",
+                                "rollout_request_id": "00000000-0000-0000-0000-000000000001",
+                                "rollout_error": None,
+                            },
+                            "version": 0,
+                            "updated_at": None,
+                            "updated_by": None,
+                        },
+                        {
+                            "config": {
+                                "instance_id": "cpu",
+                                "model_filename": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                                "download_status": "ready",
+                                "rollout_status": "not_requested",
+                                "rollout_request_id": None,
+                                "rollout_error": None,
+                            },
+                            "version": 0,
+                            "updated_at": None,
+                            "updated_by": None,
+                        },
+                    ]
+                },
+            )
+        body = json.loads(request.content)
+        assert body == {
+            "instance_id": "gpu",
+            "model_filename": "new-gpu-model.gguf",
+            "updated_by": "verified-owner",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "config": {
+                    "instance_id": "gpu",
+                    "model_filename": "new-gpu-model.gguf",
+                    "rollout_status": "not_requested",
+                },
+                "version": 1,
+                "updated_at": "2026-11-04T12:00:00+00:00",
+                "updated_by": "verified-owner",
+            },
+        )
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login_as_owner(client, app)
+        instances = client.get("/api/inference-instances")
+        updated = client.put(
+            "/api/inference-instances/gpu",
+            headers={"Origin": "https://testserver"},
+            json={"model_filename": "new-gpu-model.gguf"},
+        )
+
+    assert instances.status_code == updated.status_code == 200
+    assert instances.json()["can_edit"] is True
+    assert instances.json()["instances"][0]["config"]["download_status"] == "ready"
+    assert instances.json()["instances"][0]["config"]["rollout_status"] == "pending"
+    assert instances.json()["instances"][0]["config"]["rollout_request_id"] == (
+        "00000000-0000-0000-0000-000000000001"
+    )
+    assert [
+        item["config"]["model_filename"] for item in instances.json()["instances"]
+    ] == [
+        "qwen2.5-32b-instruct-q4_k_m.gguf",
+        "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    ]
+    assert updated.json()["config"]["model_filename"] == "new-gpu-model.gguf"
+    assert [request.method for request in forwarded] == ["GET", "PUT"]
+
+
+def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_path):
+    app = _create_app(tmp_path)
+    forwarded = []
+    request_id = "00000000-0000-0000-0000-000000000001"
+
+    def langgraph_response(request):
+        forwarded.append(request)
+        if request.method == "POST":
+            assert request.url.path.endswith("/gpu/model-downloads")
+            assert json.loads(request.content) == {
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/org/repo/model.gguf",
+                "model_sha256": "a" * 64,
+                "requested_by": "verified-owner",
+            }
+            return httpx.Response(
+                202,
+                json={
+                    "request_id": request_id,
+                    "instance_id": "gpu",
+                    "model_filename": "model.gguf",
+                    "requested_by": "verified-owner",
+                    "status": "queued",
+                    "public_error": None,
+                    "attempts": 0,
+                    "created_at": "2026-11-04T12:00:00+00:00",
+                    "updated_at": "2026-11-04T12:00:00+00:00",
+                },
+            )
+        if request.url.path.endswith(request_id):
+            return httpx.Response(
+                200,
+                json={
+                    "request_id": request_id,
+                    "instance_id": "gpu",
+                    "model_filename": "model.gguf",
+                    "requested_by": "verified-owner",
+                    "status": "failed",
+                    "public_error": "Model artifact SHA-256 did not match.",
+                    "attempts": 1,
+                    "created_at": "2026-11-04T12:00:00+00:00",
+                    "updated_at": "2026-11-04T12:01:00+00:00",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "instances": [
+                    {
+                        "instance_id": instance,
+                        "cpu_utilization_percent": {
+                            "value": None,
+                            "status": "unavailable",
+                        },
+                        "ram_used_bytes": {"value": None, "status": "unavailable"},
+                        "gpu_utilization_percent": {
+                            "value": None,
+                            "status": "unavailable",
+                        },
+                        "vram_used_bytes": {"value": None, "status": "unavailable"},
+                        "vram_total_bytes": {"value": None, "status": "unavailable"},
+                        "sampled_at": None,
+                    }
+                    for instance in ("gpu", "cpu")
+                ]
+            },
+        )
+
+    app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        member_read = client.get("/api/inference-instances")
+        member_submit = client.post(
+            "/api/inference-instances/gpu/model-downloads",
+            headers={"Origin": "https://testserver"},
+            json={
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/org/repo/model.gguf",
+                "model_sha256": "a" * 64,
+            },
+        )
+        member_status = client.get(f"/api/inference-model-downloads/{request_id}")
+        _login_as_owner(client, app)
+        submitted = client.post(
+            "/api/inference-instances/gpu/model-downloads",
+            headers={"Origin": "https://testserver"},
+            json={
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/org/repo/model.gguf",
+                "model_sha256": "a" * 64,
+            },
+        )
+        malformed = client.post(
+            "/api/inference-instances/gpu/model-downloads",
+            headers={"Origin": "https://testserver"},
+            json={
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/model?token=credential-marker",
+            },
+        )
+        status = client.get(f"/api/inference-model-downloads/{request_id}")
+        metrics = client.get("/api/inference-metrics")
+
+    assert (
+        member_read.status_code
+        == member_submit.status_code
+        == member_status.status_code
+        == 403
+    )
+    assert submitted.status_code == status.status_code == metrics.status_code == 200
+    assert malformed.status_code == 422
+    assert "credential-marker" not in malformed.text
+    assert submitted.json()["status"] == "queued"
+    assert status.json()["public_error"] == "Model artifact SHA-256 did not match."
+    assert [item["instance_id"] for item in metrics.json()["instances"]] == [
+        "gpu",
+        "cpu",
+    ]
+    assert [request.method for request in forwarded] == ["POST", "GET", "GET"]

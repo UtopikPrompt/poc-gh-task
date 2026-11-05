@@ -55,6 +55,62 @@
                 }
             }
         },
+        "/internal/management/workflows/{task_id}/retry": {
+            "post": {
+                "tags": [
+                    "internal"
+                ],
+                "operationId": "retryManagementWorkflow",
+                "description": "Requeues the latest dead event for a task, preserving its payload and immutable GitHub task context.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "task_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Dead event requeued",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "requeued"
+                                    ],
+                                    "properties": {
+                                        "requeued": {
+                                            "const": true
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/ProposalConflict"
+                    }
+                }
+            }
+        },
         "/webhooks/github": {
             "post": {
                 "operationId": "receiveGitHubWebhook",
@@ -260,6 +316,93 @@
                 }
             }
         },
+        "/internal/github/request-human-feedback": {
+            "post": {
+                "operationId": "requestHumanFeedback",
+                "description": "Posts one bounded clarification question to the task's mapped pull request, replying to an inline review comment when a source ID is provided. A stable deduplication key prevents retrying the same question as a new comment.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "task_id",
+                                    "question",
+                                    "dedupe_key"
+                                ],
+                                "properties": {
+                                    "task_id": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 256
+                                    },
+                                    "question": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 1000
+                                    },
+                                    "dedupe_key": {
+                                        "type": "string",
+                                        "pattern": "^[0-9a-f]{64}$"
+                                    },
+                                    "source_review_comment_id": {
+                                        "type": "integer",
+                                        "minimum": 1
+                                    }
+                                },
+                                "additionalProperties": false
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Question comment created or an existing matching comment reused",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": [
+                                        "comment_id",
+                                        "created"
+                                    ],
+                                    "properties": {
+                                        "comment_id": {
+                                            "type": "string"
+                                        },
+                                        "created": {
+                                            "type": "boolean"
+                                        }
+                                    },
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/ProposalConflict"
+                    },
+                    "413": {
+                        "$ref": "#/components/responses/PayloadTooLarge"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
         "/internal/github/source-tree": {
             "post": {
                 "operationId": "getTaskSourceTree",
@@ -313,7 +456,7 @@
                 },
                 "responses": {
                     "200": {
-                        "description": "At most six requested regular text files from the task's current default-branch tree, with 16 KiB per-file and 64 KiB aggregate limits.",
+                        "description": "At most six requested regular text files from the task's current default-branch tree, or from the verified pull request base commit when its number and expected GitHub ID are supplied. Files retain the 16 KiB per-file and 64 KiB aggregate limits.",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -333,6 +476,44 @@
                     },
                     "413": {
                         "$ref": "#/components/responses/PayloadTooLarge"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/github/start-task": {
+            "post": {
+                "operationId": "startTask",
+                "description": "Revalidates the saved GitHub Project item and idempotently moves an open, active Ready task to In Progress before workflow execution.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "$ref": "#/components/requestBodies/CompleteTask"
+                },
+                "responses": {
+                    "200": {
+                        "description": "GitHub confirmed task activation",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/TaskStartResult"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "$ref": "#/components/responses/BadRequest"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/ProposalConflict"
                     },
                     "503": {
                         "$ref": "#/components/responses/Unavailable"
@@ -527,7 +708,23 @@
                                         "minLength": 1,
                                         "maxLength": 240
                                     }
+                                },
+                                "pull_request_number": {
+                                    "type": "integer",
+                                    "minimum": 1
+                                },
+                                "expected_pull_request_id": {
+                                    "type": "string",
+                                    "pattern": "^[1-9][0-9]*$"
                                 }
+                            },
+                            "dependentRequired": {
+                                "pull_request_number": [
+                                    "expected_pull_request_id"
+                                ],
+                                "expected_pull_request_id": [
+                                    "pull_request_number"
+                                ]
                             },
                             "additionalProperties": false
                         }
@@ -550,6 +747,29 @@
                                 }
                             },
                             "additionalProperties": true
+                        }
+                    }
+                }
+            },
+            "CompleteTask": {
+                "required": true,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "required": [
+                                "task_id"
+                            ],
+                            "properties": {
+                                "task_id": {
+                                    "type": "string",
+                                    "minLength": 1
+                                },
+                                "no_ci_resolution": {
+                                    "$ref": "#/components/schemas/NoCIResolutionAudit"
+                                }
+                            },
+                            "additionalProperties": false
                         }
                     }
                 }
@@ -621,7 +841,10 @@
                         "enum": [
                             "ready",
                             "ci",
-                            "merged"
+                            "merged",
+                            "review_changes_requested",
+                            "human_feedback_reply",
+                            "agent_repair_requested"
                         ]
                     },
                     "latest_event_at": {
@@ -668,9 +891,10 @@
                             "unknown",
                             "success",
                             "pending",
-                            "failure"
+                            "failure",
+                            "unavailable"
                         ],
-                        "description": "Aggregate of the latest persisted CI event for the task."
+                        "description": "Aggregate of the latest persisted CI event; unavailable means a completed query found no checks and is never success."
                     },
                     "ci_complete": {
                         "type": [
@@ -788,7 +1012,9 @@
                 "required": [
                     "pull_request_id",
                     "repository",
-                    "number"
+                    "number",
+                    "head_sha",
+                    "ci_head_sha"
                 ],
                 "properties": {
                     "pull_request_id": {
@@ -799,6 +1025,18 @@
                     },
                     "number": {
                         "type": "integer"
+                    },
+                    "head_sha": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The resulting deterministic task branch head, whether newly committed or unchanged."
+                    },
+                    "ci_head_sha": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "The PR head SHA used for the returned CI snapshot; null means the queried head identity was unavailable."
                     },
                     "url": {
                         "type": [
@@ -910,6 +1148,23 @@
                 },
                 "additionalProperties": false
             },
+            "TaskStartResult": {
+                "type": "object",
+                "required": [
+                    "started",
+                    "project_update"
+                ],
+                "properties": {
+                    "started": {
+                        "const": true
+                    },
+                    "project_update": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                },
+                "additionalProperties": true
+            },
             "CompletionResult": {
                 "oneOf": [
                     {
@@ -926,7 +1181,8 @@
                                 "enum": [
                                     "task_mapping_unavailable",
                                     "task_mapping_invalid",
-                                    "merge_or_checks_unverified"
+                                    "merge_or_checks_unverified",
+                                    "no_ci_resolution_invalid"
                                 ]
                             }
                         },
@@ -950,6 +1206,36 @@
                         "additionalProperties": true
                     }
                 ]
+            },
+            "NoCIResolutionAudit": {
+                "type": "object",
+                "required": [
+                    "actor",
+                    "decided_at",
+                    "decision",
+                    "pull_request_id"
+                ],
+                "properties": {
+                    "actor": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39
+                    },
+                    "decided_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "maxLength": 40
+                    },
+                    "decision": {
+                        "const": "proceed_without_ci"
+                    },
+                    "pull_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    }
+                },
+                "additionalProperties": false
             }
         },
         "responses": {

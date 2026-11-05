@@ -85,6 +85,7 @@ def test_runtime_secret_example_and_apply_script_exclude_usernames():
         "LANGGRAPH_DB_PASSWORD",
         "GITHUB_WEBHOOK_SECRET",
         "INTERNAL_SERVICE_TOKEN",
+        "MODEL_RECONCILER_TOKEN",
     }
     assert example_keys == expected_keys
 
@@ -167,7 +168,7 @@ def test_postgres_and_migration_job_are_bundled_in_every_environment():
         assert job_spec["containers"][0]["command"] == [
             "python",
             "-m",
-            "langgraph_service.migrate",
+            "langgraph_service.storage.migrate",
         ]
         job_secrets = {
             item["name"]: item["valueFrom"]["secretKeyRef"]["key"]
@@ -333,7 +334,7 @@ def test_installation_migration_is_additive_and_registered():
     ).read_text()
     migration_runner = (
         REPOSITORY_ROOT
-        / "codefactory/langgraph-service/src/langgraph_service/migrate.py"
+        / "codefactory/langgraph-service/src/langgraph_service/storage/migrate.py"
     ).read_text()
 
     assert "ADD COLUMN IF NOT EXISTS installation_id BIGINT" in migration
@@ -349,3 +350,45 @@ def test_installation_migration_is_additive_and_registered():
         "ADD COLUMN IF NOT EXISTS project_owner_type TEXT" in project_identity_migration
     )
     assert '"004_github_project_identity.sql"' in migration_runner
+
+
+def test_review_event_migration_extends_inbox_constraint_and_is_bundled():
+    migration = (
+        REPOSITORY_ROOT
+        / "codefactory/github-service/migrations/005_github_review_event.sql"
+    ).read_text()
+    migration_runner = (
+        REPOSITORY_ROOT
+        / "codefactory/langgraph-service/src/langgraph_service/storage/migrate.py"
+    ).read_text()
+    migration_job = (
+        KUBERNETES_ROOT / "bases/platform/database-migrations.yaml"
+    ).read_text()
+
+    assert "DROP CONSTRAINT IF EXISTS task_event_inbox_event_type_check" in migration
+    assert "'review_changes_requested'" in migration
+    assert '"005_github_review_event.sql"' in migration_runner
+    assert (
+        "cp /app/migrations/005_github_review_event.sql "
+        "/migrations/005_github_review_event.sql"
+    ) in migration_job
+
+
+def test_agent_roster_migration_is_registered_and_bundled():
+    migration = (
+        REPOSITORY_ROOT
+        / "codefactory/langgraph-service/migrations/003_agent_roster.sql"
+    ).read_text()
+    migration_runner = (
+        REPOSITORY_ROOT
+        / "codefactory/langgraph-service/src/langgraph_service/storage/migrate.py"
+    ).read_text()
+    migration_job = (
+        KUBERNETES_ROOT / "bases/platform/database-migrations.yaml"
+    ).read_text()
+
+    assert "task_agent_roster_snapshot" in migration
+    assert '"003_agent_roster.sql"' in migration_runner
+    assert (
+        "cp /app/migrations/003_agent_roster.sql /migrations/003_agent_roster.sql"
+    ) in migration_job

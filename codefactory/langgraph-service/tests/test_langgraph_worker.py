@@ -3,8 +3,8 @@ import logging
 
 import httpx
 import pytest
-import langgraph_service.github_client as github_client
-from langgraph_service.github_client import (
+import langgraph_service.integrations.github_client as github_client
+from langgraph_service.integrations.github_client import (
     GitHubServiceClient,
     build_submit_proposal_operation,
 )
@@ -23,7 +23,9 @@ def test_claim_event_retries_connect_timeout_and_recovers(caplog, monkeypatch):
         return httpx.Response(200, json={"event": event})
 
     monkeypatch.setattr(github_client.time, "sleep", delays.append)
-    caplog.set_level(logging.WARNING, logger="langgraph_service.github_client")
+    caplog.set_level(
+        logging.WARNING, logger="langgraph_service.integrations.github_client"
+    )
     client = GitHubServiceClient(
         service_url="http://github-service",
         token="test-token",
@@ -53,7 +55,9 @@ def test_claim_event_stops_after_bounded_connect_timeout_attempts(caplog, monkey
         raise httpx.ConnectTimeout("connect timed out", request=request)
 
     monkeypatch.setattr(github_client.time, "sleep", delays.append)
-    caplog.set_level(logging.WARNING, logger="langgraph_service.github_client")
+    caplog.set_level(
+        logging.WARNING, logger="langgraph_service.integrations.github_client"
+    )
     client = GitHubServiceClient(
         service_url="http://github-service",
         token="test-token",
@@ -120,6 +124,59 @@ def test_claim_event_does_not_retry_non_success_http_response(monkeypatch):
     assert delays == []
 
 
+def test_start_task_uses_authenticated_github_service_endpoint():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"started": True})
+
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.start_task("task-1") == {"started": True}
+    finally:
+        client.close()
+
+    assert len(requests) == 1
+    assert requests[0].url.path == "/internal/github/start-task"
+    assert requests[0].headers["authorization"] == "Bearer test-token"
+    assert requests[0].read() == b'{"task_id":"task-1"}'
+
+
+def test_complete_task_forwards_no_ci_audit_to_github_service():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"completed": True})
+
+    resolution = {
+        "actor": "verified-owner",
+        "decided_at": "2026-11-03T12:00:00+00:00",
+        "decision": "proceed_without_ci",
+        "pull_request_id": "pr-17",
+    }
+    client = GitHubServiceClient(
+        service_url="http://github-service",
+        token="test-token",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.complete_task("task-1", resolution) == {"completed": True}
+    finally:
+        client.close()
+
+    assert requests[0].url.path == "/internal/github/complete-task"
+    assert json.loads(requests[0].content) == {
+        "task_id": "task-1",
+        "no_ci_resolution": resolution,
+    }
+
+
 class FakeQueue:
     def __init__(self):
         self.event = {
@@ -143,9 +200,13 @@ class FakeQueue:
     def retry_event(self, event_id, claim_token, error):
         self.calls.append(("retry", event_id, claim_token, error))
 
-    def complete_task(self, task_id):
-        self.calls.append(("complete", task_id))
+    def complete_task(self, task_id, no_ci_resolution=None):
+        self.calls.append(("complete", task_id, no_ci_resolution))
         return self.completion
+
+    def start_task(self, task_id):
+        self.calls.append(("start", task_id))
+        return {"started": True}
 
 
 class FakeLifecycle:
@@ -175,7 +236,11 @@ def test_worker_claims_invokes_and_acknowledges_with_event_identity():
             "webhook_delivery_id": "delivery-1",
         }
     ]
-    assert queue.calls == ["claim", ("ack", "event-1", "claim-1")]
+    assert queue.calls == [
+        "claim",
+        ("start", "task-1"),
+        ("ack", "event-1", "claim-1"),
+    ]
     assert worker.process_one() is False
 
 
@@ -189,7 +254,24 @@ def test_worker_retries_graph_failure_without_acknowledging():
 
     assert queue.calls == [
         "claim",
+        ("start", "task-1"),
         ("retry", "event-1", "claim-1", "temporary failure"),
+    ]
+
+
+def test_worker_retries_when_github_does_not_confirm_task_start():
+    queue = FakeQueue()
+    queue.start_task = lambda task_id: {"started": False}
+    lifecycle = FakeLifecycle()
+    worker = LangGraphEventWorker(queue=queue, lifecycle=lifecycle)
+
+    with pytest.raises(RuntimeError, match="GitHub has not confirmed"):
+        worker.process_one()
+
+    assert not lifecycle.events
+    assert queue.calls == [
+        "claim",
+        ("retry", "event-1", "claim-1", "GitHub has not confirmed task activation"),
     ]
 
 
@@ -225,9 +307,33 @@ def test_worker_only_records_done_after_github_completion_confirmation():
     }
     assert queue.calls == [
         "claim",
-        ("complete", "task-1"),
+        ("complete", "task-1", None),
         ("ack", "event-1", "claim-1"),
     ]
+
+
+def test_worker_passes_audited_no_ci_resolution_to_github_completion():
+    queue = FakeQueue()
+    queue.event["payload"] = {
+        "task_id": "task-1",
+        "event_type": "merged",
+        "merged": True,
+    }
+    queue.completion = {"completed": True}
+    resolution = {
+        "actor": "verified-owner",
+        "decided_at": "2026-11-03T12:00:00+00:00",
+        "decision": "proceed_without_ci",
+        "pull_request_id": "pr-17",
+    }
+    lifecycle = FakeLifecycle(
+        result={"event_status": "completion_requested", "no_ci_resolution": resolution}
+    )
+    worker = LangGraphEventWorker(queue=queue, lifecycle=lifecycle)
+
+    assert worker.process_one() is True
+
+    assert queue.calls[1] == ("complete", "task-1", resolution)
 
 
 def test_worker_retries_merge_event_while_github_revalidation_is_unconfirmed():
@@ -245,7 +351,7 @@ def test_worker_retries_merge_event_while_github_revalidation_is_unconfirmed():
 
     assert queue.calls == [
         "claim",
-        ("complete", "task-1"),
+        ("complete", "task-1", None),
         ("retry", "event-1", "claim-1", "GitHub has not confirmed task completion"),
     ]
     assert not any(

@@ -24,6 +24,7 @@ class RuntimeSettings:
     github_api_url: str = "https://api.github.com"
     project_status_field_name: str = "Status"
     project_ready_option_name: str = "Ready"
+    project_in_progress_option_name: str = "In Progress"
     project_done_option_name: str = "Done"
 
     @classmethod
@@ -61,6 +62,9 @@ class RuntimeSettings:
             ),
             project_ready_option_name=os.environ.get(
                 "GITHUB_PROJECT_READY_OPTION_NAME", "Ready"
+            ),
+            project_in_progress_option_name=os.environ.get(
+                "GITHUB_PROJECT_IN_PROGRESS_OPTION_NAME", "In Progress"
             ),
             project_done_option_name=os.environ.get(
                 "GITHUB_PROJECT_DONE_OPTION_NAME", "Done"

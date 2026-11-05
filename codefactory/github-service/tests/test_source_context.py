@@ -65,11 +65,40 @@ def _source(tmp_path, *, contents=None, entries=None, truncated=False):
             return httpx.Response(
                 200, json={"full_name": "example/project", "default_branch": "main"}
             )
+        if request.url.path == "/repos/example/project/pulls/17":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 9001,
+                    "number": 17,
+                    "state": "open",
+                    "body": "",
+                    "html_url": "https://github.example/example/project/pull/17",
+                    "repository": {"full_name": "example/project"},
+                    "head": {
+                        "ref": "task-branch",
+                        "sha": "head-sha",
+                        "repo": {"full_name": "example/project"},
+                    },
+                    "base": {
+                        "ref": "main",
+                        "sha": "pull-base-commit",
+                        "repo": {"full_name": "example/project"},
+                    },
+                },
+            )
         if request.url.path.endswith("/git/ref/heads/main"):
             return httpx.Response(200, json={"object": {"sha": "commit-sha"}})
         if request.url.path.endswith("/git/commits/commit-sha"):
             return httpx.Response(200, json={"tree": {"sha": "tree-sha"}})
+        if request.url.path.endswith("/git/commits/pull-base-commit"):
+            return httpx.Response(200, json={"tree": {"sha": "pull-base-tree"}})
         if request.url.path.endswith("/git/trees/tree-sha"):
+            return httpx.Response(
+                200,
+                json={"truncated": truncated, "tree": entries},
+            )
+        if request.url.path.endswith("/git/trees/pull-base-tree"):
             return httpx.Response(
                 200,
                 json={"truncated": truncated, "tree": entries},
@@ -173,6 +202,38 @@ def test_candidate_tree_and_selected_files_are_task_scoped_and_safe(tmp_path):
         value <= 12
         for request in requests
         for value in request.extensions["timeout"].values()
+    )
+
+
+def test_source_files_can_read_only_from_the_verified_pull_request_base(tmp_path):
+    source, github, requests = _source(
+        tmp_path, contents={"README.md": b"base README\n"}
+    )
+    try:
+        files = source.read_files(
+            "task-1",
+            ["README.md"],
+            pull_request_number=17,
+            expected_pull_request_id="9001",
+        )
+        with pytest.raises(ValueError, match="identity does not match"):
+            source.read_files(
+                "task-1",
+                ["README.md"],
+                pull_request_number=17,
+                expected_pull_request_id="9002",
+            )
+    finally:
+        github.close()
+
+    assert files == {"files": [{"path": "README.md", "content": "base README\n"}]}
+    assert sum(request.url.path.endswith("/pulls/17") for request in requests) == 2
+    assert (
+        sum(
+            request.url.path.endswith("/git/commits/pull-base-commit")
+            for request in requests
+        )
+        == 1
     )
 
 

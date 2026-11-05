@@ -94,7 +94,14 @@ class WebhookService:
                     if not isinstance(task_id_value, str) or not task_id_value.strip():
                         failure_reason = "normalized_event_validation_failure"
                         raise ValueError("normalized event must include a task_id")
-                    if event_type not in {"ready", "ci", "merged"}:
+                    if event_type not in {
+                        "ready",
+                        "ci",
+                        "merged",
+                        "review_changes_requested",
+                        "human_feedback_reply",
+                        "agent_repair_requested",
+                    }:
                         failure_reason = "normalized_event_validation_failure"
                         raise ValueError(
                             "normalized event has an unsupported event_type"

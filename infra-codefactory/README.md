@@ -66,7 +66,7 @@ Create these namespaced secrets before deploying:
 
 - Secret `codefactory-runtime-secrets`, with keys `POSTGRES_ADMIN_PASSWORD`,
   `GITHUB_DB_PASSWORD`, `LANGGRAPH_DB_PASSWORD`, `GITHUB_WEBHOOK_SECRET`, and
-  `INTERNAL_SERVICE_TOKEN`. The migration Job uses the admin password and both
+  `INTERNAL_SERVICE_TOKEN`, and `MODEL_RECONCILER_TOKEN`. The migration Job uses the admin password and both
   service passwords; each running service receives only its own DB password.
 - Secret `codefactory-github-app`, with key `private-key.pem`. The GitHub
   Deployment mounts this key read-only and sets `GITHUB_PRIVATE_KEY_PATH`.
@@ -77,13 +77,17 @@ webhook node ID using that event's installation; organization and user Project
 owners are supported when GraphQL access is available. The linked issue
 repository is checked through the same installation, and inaccessible Projects
 or repositories fail closed. The default status field and option names are
-`Status`, `Ready`, and `Done`; optional non-secret overrides are
+`Status`, `Ready`, `In Progress`, and `Done`; optional non-secret overrides are
 `GITHUB_PROJECT_STATUS_FIELD_NAME`,
-`GITHUB_PROJECT_READY_OPTION_NAME`, and `GITHUB_PROJECT_DONE_OPTION_NAME`.
+`GITHUB_PROJECT_READY_OPTION_NAME`,
+`GITHUB_PROJECT_IN_PROGRESS_OPTION_NAME`, and
+`GITHUB_PROJECT_DONE_OPTION_NAME`.
 Project owner, Project/item node IDs, field/option IDs, linked repository, and
 installation context are resolved or taken from the authenticated event and
-stored immutably per task. Completion revalidates and updates that same Project
-item. Every signed webhook must include a positive installation ID. The GitHub
+stored immutably per task. Accepted execution revalidates and updates that same
+Project item to `In Progress`; completion revalidates and sets it to `Done` only
+after GitHub confirms the merge and required checks. Every signed webhook must
+include a positive installation ID. The GitHub
 service uses that installation for later PR, check, and completion calls; there
 is no static installation setting or fallback.
 
@@ -109,7 +113,7 @@ grant a ruleset or branch-protection bypass. Proposal writes target only the
 deterministic task branch and use non-force ref updates; the base branch is not
 written.
 
-The LangGraph image includes `langgraph_service.workflow_operations` as the
+The LangGraph image includes `langgraph_service.workflow.workflow_operations` as the
 default factory, so no operator-supplied module name is needed. It calls the
 internal llama.cpp provider and the task-scoped GitHub source-context API to
 select candidate paths and retrieve a small set of bounded text files. It then

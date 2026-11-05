@@ -14,3 +14,6 @@ kubectl kustomize inference-platform/kubernetes
 
 The llama.cpp smoke-test commands and measured artifacts are documented in
 [`inference/llama-cpp-smoke/README.md`](inference/llama-cpp-smoke/README.md).
+Model storage, download-worker, Prometheus, and DCGM exporter prerequisites are
+documented in
+[`docs/infrastructure/inference-model-runtime-operator-note.md`](docs/infrastructure/inference-model-runtime-operator-note.md).

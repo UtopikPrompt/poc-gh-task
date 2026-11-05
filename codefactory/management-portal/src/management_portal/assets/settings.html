@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Agent configuration</title>
+    <link rel="stylesheet" href="/management-portal/assets/portal.css">
+    <script src="/management-portal/assets/settings.js" defer></script>
+</head>
+
+<body class="settings-page">
+    <main class="settings-shell">
+        <header>
+            <div class="header-top">
+                <h1>Agent configuration</h1>
+                <div class="header-actions">
+                    <form action="/auth/logout" method="post"><button type="submit">Sign out</button></form>
+                </div>
+            </div>
+            <nav class="primary-nav" aria-label="Primary navigation">
+                <a href="/">Dashboard</a>
+                <a href="/settings" aria-current="page">Configuration</a>
+            </nav>
+        </header>
+        <section class="settings-section runtime-section" aria-labelledby="agent-config-heading">
+            <h2 id="agent-config-heading">Runtime settings</h2>
+            <form id="agent-config-form">
+                <label for="completion-timeout">Local model timeout (seconds)</label>
+                <div class="config-controls">
+                    <input id="completion-timeout" name="completion_timeout_seconds" type="number" min="1" max="90"
+                        step="1" required>
+                    <button id="save-config" type="submit" disabled>Save configuration</button>
+                </div>
+            </form>
+            <div class="runtime-feedback">
+                <p id="config-message" role="status" aria-live="polite" data-state="loading">Loading configuration...
+                </p>
+                <p id="config-audit" class="audit-line"></p>
+            </div>
+        </section>
+        <section class="settings-section inference-section" aria-labelledby="inference-heading">
+            <div class="roster-heading">
+                <h2 id="inference-heading">Inference instances</h2>
+                <div class="roster-status">
+                    <p id="inference-message" role="status" aria-live="polite" data-state="loading">Loading models...
+                    </p>
+                </div>
+            </div>
+            <div class="inference-instance-grid">
+                <form class="inference-instance" data-instance="gpu">
+                    <h3>GPU instance</h3>
+                    <label for="gpu-model-filename">Selected GGUF filename</label>
+                    <div class="config-controls">
+                        <input id="gpu-model-filename" class="instance-model-input" name="model_filename" type="text"
+                            maxlength="205" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf" required>
+                        <button type="submit" disabled>Save GPU model</button>
+                    </div>
+                    <label for="gpu-model-url">Hugging Face model URL</label>
+                    <input id="gpu-model-url" class="model-artifact-input" name="model_url" type="url"
+                        autocomplete="off" maxlength="4096" disabled>
+                    <label for="gpu-model-sha256">Required SHA-256</label>
+                    <input id="gpu-model-sha256" class="model-artifact-input" name="model_sha256" type="text"
+                        minlength="64" maxlength="64" pattern="[A-Fa-f0-9]{64}" autocomplete="off" disabled>
+                    <div class="config-controls download-controls">
+                        <button class="download-model" type="button" disabled>Request GPU download</button>
+                        <span class="download-status" role="status" aria-live="polite">No download requested.</span>
+                    </div>
+                    <p class="rollout-status" role="status" aria-live="polite">Model rollout not requested.</p>
+                    <p class="audit-line" id="gpu-model-audit"></p>
+                </form>
+                <form class="inference-instance" data-instance="cpu">
+                    <h3>CPU instance</h3>
+                    <label for="cpu-model-filename">Selected GGUF filename</label>
+                    <div class="config-controls">
+                        <input id="cpu-model-filename" class="instance-model-input" name="model_filename" type="text"
+                            maxlength="205" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf" required>
+                        <button type="submit" disabled>Save CPU model</button>
+                    </div>
+                    <label for="cpu-model-url">Hugging Face model URL</label>
+                    <input id="cpu-model-url" class="model-artifact-input" name="model_url" type="url"
+                        autocomplete="off" maxlength="4096" disabled>
+                    <label for="cpu-model-sha256">Required SHA-256</label>
+                    <input id="cpu-model-sha256" class="model-artifact-input" name="model_sha256" type="text"
+                        minlength="64" maxlength="64" pattern="[A-Fa-f0-9]{64}" autocomplete="off" disabled>
+                    <div class="config-controls download-controls">
+                        <button class="download-model" type="button" disabled>Request CPU download</button>
+                        <span class="download-status" role="status" aria-live="polite">No download requested.</span>
+                    </div>
+                    <p class="rollout-status" role="status" aria-live="polite">Model rollout not requested.</p>
+                    <p class="audit-line" id="cpu-model-audit"></p>
+                </form>
+            </div>
+            <h3>Inference metrics</h3>
+            <div class="table-wrap inference-metrics-wrap">
+                <table aria-label="Per-instance inference metrics">
+                    <thead>
+                        <tr>
+                            <th scope="col">Instance</th>
+                            <th scope="col">CPU</th>
+                            <th scope="col">RAM used</th>
+                            <th scope="col">GPU</th>
+                            <th scope="col">VRAM</th>
+                            <th scope="col">Sampled</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inference-metrics-body">
+                        <tr>
+                            <td colspan="6">Metrics unavailable.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p id="inference-metrics-message" class="audit-line" role="status" aria-live="polite"></p>
+        </section>
+        <section class="settings-section roster-section" aria-labelledby="agent-roster-heading">
+            <div class="roster-heading">
+                <h2 id="agent-roster-heading">Agent roster</h2>
+                <div class="roster-status">
+                    <p id="roster-message" role="status" aria-live="polite" data-state="loading">Loading roster...</p>
+                    <p id="roster-audit" class="audit-line"></p>
+                </div>
+            </div>
+            <form id="agent-roster-form">
+                <div id="roster-summary" class="roster-editor"></div>
+                <div class="roster-actions">
+                    <div class="add-profile-control">
+                        <label for="add-profile-role">Add profile for</label>
+                        <select id="add-profile-role" name="add_profile_role">
+                            <option value="context">Context</option>
+                            <option value="planning">Planning</option>
+                            <option value="risk">Risk</option>
+                            <option value="implementation">Implementation</option>
+                            <option value="repair">Repair</option>
+                        </select>
+                        <button id="add-profile" type="button">Add profile</button>
+                    </div>
+                    <button id="save-roster" class="primary-action" type="submit" disabled>Save roster</button>
+                </div>
+            </form>
+            <p class="roster-note">Skill IDs are metadata only; the LangGraph service does not load or execute them.</p>
+        </section>
+    </main>
+</body>
+
+</html>

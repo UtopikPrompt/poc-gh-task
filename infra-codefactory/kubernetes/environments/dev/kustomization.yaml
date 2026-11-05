@@ -10,6 +10,7 @@ resources:
 - storage.yaml
 patches:
 - path: database-config.yaml
+- path: database-migrations-profile.yaml
 - path: postgres-storage.yaml
 - path: local-image-pull-policy.yaml
 images:

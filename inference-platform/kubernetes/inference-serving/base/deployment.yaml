@@ -23,7 +23,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - --verbose
-        - -m
+        - --model
         - /models/model.gguf
         - --n-gpu-layers
         - all

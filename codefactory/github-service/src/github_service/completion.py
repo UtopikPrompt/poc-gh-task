@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
+import re
 from typing import Protocol
 
 
@@ -19,6 +21,7 @@ class CompletionGitHubAPI(Protocol):
         pull_request_number: int,
         expected_pull_request_id: str,
         installation_id: int,
+        no_ci_resolution: Mapping[str, object] | None = None,
     ) -> Mapping[str, object]: ...
 
     def mark_task_done(
@@ -38,7 +41,11 @@ class GitHubTaskCompletion:
         self._store = store
         self._github = github
 
-    def __call__(self, task_id: str) -> dict[str, object]:
+    def __call__(
+        self,
+        task_id: str,
+        no_ci_resolution: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
         pull_request = self._store.pull_request_for_task(task_id)
         context = self._store.task_context(task_id)
         if pull_request is None or context is None:
@@ -66,11 +73,17 @@ class GitHubTaskCompletion:
         if installation_id <= 0:
             return {"completed": False, "reason": "task_mapping_invalid"}
 
+        if no_ci_resolution is not None and not _valid_no_ci_resolution(
+            no_ci_resolution, pull_request_id
+        ):
+            return {"completed": False, "reason": "no_ci_resolution_invalid"}
+
         verification = self._github.verify_pull_request_completion(
             repository,
             number,
             pull_request_id,
             installation_id,
+            no_ci_resolution,
         )
         if verification.get("verified") is not True:
             return {"completed": False, "reason": "merge_or_checks_unverified"}
@@ -85,3 +98,26 @@ class GitHubTaskCompletion:
             installation_id,
         )
         return {"completed": True, "project_update": dict(project_update)}
+
+
+def _valid_no_ci_resolution(
+    resolution: Mapping[str, object],
+    pull_request_id: str,
+) -> bool:
+    actor = resolution.get("actor")
+    decided_at = resolution.get("decided_at")
+    if (
+        resolution.get("decision") != "proceed_without_ci"
+        or set(resolution) != {"actor", "decided_at", "decision", "pull_request_id"}
+        or resolution.get("pull_request_id") != pull_request_id
+        or not isinstance(actor, str)
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", actor)
+        or not isinstance(decided_at, str)
+        or len(decided_at) > 40
+    ):
+        return False
+    try:
+        timestamp = datetime.fromisoformat(decided_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return timestamp.tzinfo is not None and timestamp.utcoffset() is not None

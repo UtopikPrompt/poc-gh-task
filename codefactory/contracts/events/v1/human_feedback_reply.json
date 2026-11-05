@@ -1,0 +1,68 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Human PR feedback reply event",
+    "type": "object",
+    "required": [
+        "task_id",
+        "event_type",
+        "event_pull_request_id",
+        "human_feedback_reply",
+        "reply_comment_id",
+        "reply_action",
+        "installation_id",
+        "webhook_delivery_id"
+    ],
+    "examples": [
+        {
+            "task_id": "PVTI_item",
+            "event_type": "human_feedback_reply",
+            "event_pull_request_id": "9001",
+            "human_feedback_reply": "Yes, include archived records.",
+            "reply_comment_id": "4461111143",
+            "reply_action": "created",
+            "installation_id": 654,
+            "webhook_delivery_id": "delivery-4"
+        }
+    ],
+    "properties": {
+        "task_id": {
+            "type": "string",
+            "minLength": 1
+        },
+        "event_type": {
+            "const": "human_feedback_reply"
+        },
+        "event_pull_request_id": {
+            "type": "string",
+            "minLength": 1
+        },
+        "human_feedback_reply": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768
+        },
+        "reply_to_comment_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+        },
+        "reply_comment_id": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$"
+        },
+        "reply_action": {
+            "enum": [
+                "created",
+                "edited"
+            ]
+        },
+        "installation_id": {
+            "type": "integer",
+            "minimum": 1
+        },
+        "webhook_delivery_id": {
+            "type": "string",
+            "minLength": 1
+        }
+    },
+    "additionalProperties": true
+}

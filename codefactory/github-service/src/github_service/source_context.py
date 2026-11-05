@@ -107,6 +107,10 @@ class SourceContextGitHubAPI(Protocol):
         timeout: float | None = None,
     ) -> Mapping[str, object] | None: ...
 
+    def get_pull_request(
+        self, repository: str, number: int, installation_id: int
+    ) -> Mapping[str, object]: ...
+
     def get_commit(
         self,
         repository: str,
@@ -150,7 +154,13 @@ class GitHubTaskSource:
         ][:MAX_CANDIDATE_PATHS]
         return {"paths": candidates}
 
-    def read_files(self, task_id: str, paths: object) -> dict[str, object]:
+    def read_files(
+        self,
+        task_id: str,
+        paths: object,
+        pull_request_number: int | None = None,
+        expected_pull_request_id: str | None = None,
+    ) -> dict[str, object]:
         if not isinstance(paths, list) or not paths or len(paths) > MAX_SOURCE_PATHS:
             raise ValueError(f"paths must contain 1 to {MAX_SOURCE_PATHS} entries")
         if any(not isinstance(path, str) for path in paths):
@@ -158,9 +168,27 @@ class GitHubTaskSource:
         folded_paths = [path.casefold() for path in paths]
         if len(set(folded_paths)) != len(paths):
             raise ValueError("source paths must be unique and case-distinct")
+        if (pull_request_number is None) != (expected_pull_request_id is None):
+            raise ValueError(
+                "pull request number and identity must be supplied together"
+            )
+        if pull_request_number is not None and (
+            not isinstance(pull_request_number, int)
+            or isinstance(pull_request_number, bool)
+            or pull_request_number <= 0
+            or not isinstance(expected_pull_request_id, str)
+            or not expected_pull_request_id.isdecimal()
+            or int(expected_pull_request_id) <= 0
+        ):
+            raise ValueError("pull request source identity is invalid")
 
         deadline = time.monotonic() + SOURCE_READ_TIMEOUT_SECONDS
-        repository, installation_id, entries = self._base_tree(task_id, deadline)
+        repository, installation_id, entries = self._base_tree(
+            task_id,
+            deadline,
+            pull_request_number=pull_request_number,
+            expected_pull_request_id=expected_pull_request_id,
+        )
         selected_entries: list[tuple[str, Mapping[str, object]]] = []
         declared_total = 0
         for path in paths:
@@ -199,7 +227,12 @@ class GitHubTaskSource:
         return {"files": files}
 
     def _base_tree(
-        self, task_id: str, deadline: float
+        self,
+        task_id: str,
+        deadline: float,
+        *,
+        pull_request_number: int | None = None,
+        expected_pull_request_id: str | None = None,
     ) -> tuple[str, int, dict[str, Mapping[str, object]]]:
         if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 256:
             raise ValueError("task_id must be a non-empty bounded string")
@@ -221,17 +254,31 @@ class GitHubTaskSource:
             repository_info["full_name"].casefold() != repository.casefold()
         ):
             raise ValueError("GitHub repository identity does not match task context")
-        branch = repository_info.get("default_branch")
-        if not isinstance(branch, str) or not branch:
-            raise ValueError("GitHub repository default branch is unavailable")
-        reference = self._github.get_ref(
-            repository,
-            branch,
-            installation_id,
-            timeout=_remaining(deadline),
-        )
-        ref_object = reference.get("object") if isinstance(reference, Mapping) else None
-        commit_sha = ref_object.get("sha") if isinstance(ref_object, Mapping) else None
+        if pull_request_number is not None:
+            pull_request = self._github.get_pull_request(
+                repository, pull_request_number, installation_id
+            )
+            if pull_request.get("pull_request_id") != expected_pull_request_id:
+                raise ValueError(
+                    "GitHub pull request identity does not match task state"
+                )
+            commit_sha = pull_request.get("base_sha")
+        else:
+            branch = repository_info.get("default_branch")
+            if not isinstance(branch, str) or not branch:
+                raise ValueError("GitHub repository default branch is unavailable")
+            reference = self._github.get_ref(
+                repository,
+                branch,
+                installation_id,
+                timeout=_remaining(deadline),
+            )
+            ref_object = (
+                reference.get("object") if isinstance(reference, Mapping) else None
+            )
+            commit_sha = (
+                ref_object.get("sha") if isinstance(ref_object, Mapping) else None
+            )
         if not isinstance(commit_sha, str) or not commit_sha:
             raise ValueError("GitHub repository default branch was not found")
         commit = self._github.get_commit(

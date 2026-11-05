@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: inference-model-downloader-config
+data:
+  LANGGRAPH_DB_HOST: codefactory-postgres.codefactory.svc.cluster.local
+  LANGGRAPH_DB_PORT: "5432"
+  LANGGRAPH_DB_NAME: codefactory
+  LANGGRAPH_DB_USERNAME: codefactory_langgraph
+  LANGGRAPH_DB_SSLMODE: disable
+  MODEL_DIRECTORY: /storage
+  MODEL_DOWNLOAD_POLL_SECONDS: "5"
+  MODEL_DOWNLOAD_LEASE_SECONDS: "120"

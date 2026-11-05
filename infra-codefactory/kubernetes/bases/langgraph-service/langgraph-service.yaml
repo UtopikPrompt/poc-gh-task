@@ -93,6 +93,11 @@ spec:
             secretKeyRef:
               name: codefactory-runtime-secrets
               key: INTERNAL_SERVICE_TOKEN
+        - name: MODEL_RECONCILER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: codefactory-runtime-secrets
+              key: MODEL_RECONCILER_TOKEN
         volumeMounts:
         - name: tmp
           mountPath: /tmp

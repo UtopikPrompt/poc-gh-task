@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from collections.abc import Mapping
 
 from fastapi.testclient import TestClient
 from github_service.bootstrap import create_app, create_github_app
@@ -10,10 +11,11 @@ from github_service.events import (
     GitHubWebhook,
     ProjectEventConfig,
 )
+from github_service.execution import GitHubTaskExecutionReporter
 from github_service.publishing import FileChangeProposal, GitHubTaskPublisher
 from github_service.settings import RuntimeSettings
-from langgraph_service.operations import WorkflowOperations
-from langgraph_service.service import LangGraphTaskService
+from langgraph_service.workflow.operations import WorkflowOperations
+from langgraph_service.workflow.service import LangGraphTaskService
 from langgraph_service.worker import LangGraphEventWorker
 
 
@@ -27,6 +29,7 @@ class FakeGitHubEventAPI:
         self.trees = {"base-tree": {}}
         self.blobs = {}
         self.pull_requests = []
+        self.started_items = []
 
     def get_project_item(self, item_node_id, installation_id):
         assert item_node_id == "PVTI_test_item"
@@ -52,8 +55,12 @@ class FakeGitHubEventAPI:
         assert repository == "example/project"
         assert pull_request_number == 17
         assert installation_id == 654
+        pull_request = next(
+            pr for pr in self.pull_requests if pr["number"] == pull_request_number
+        )
         return {
             "pull_request_id": "9001",
+            "head_sha": self.refs[pull_request["head"]],
             "ci_checks": [{"name": "required-tests", "status": self.ci_status}],
             "ci_complete": self.ci_complete,
         }
@@ -126,7 +133,12 @@ class FakeGitHubEventAPI:
         return result
 
     def verify_pull_request_completion(
-        self, repository, number, expected_id, installation_id
+        self,
+        repository,
+        number,
+        expected_id,
+        installation_id,
+        no_ci_resolution=None,
     ):
         ci = self.get_pull_request_ci(repository, number, installation_id)
         return {
@@ -140,11 +152,20 @@ class FakeGitHubEventAPI:
         self.completed_items.append(state["project_item_id"])
         return {"updated": True}
 
+    def mark_task_in_progress(self, state, installation_id):
+        assert installation_id == 654
+        self.started_items.append(state["project_item_id"])
+        return {"updated": True}
+
 
 class LocalGitHubQueue:
     def __init__(self, store, github):
         self._store = store
         self._completion = GitHubTaskCompletion(
+            store=store,
+            github=github,
+        )
+        self._start = GitHubTaskExecutionReporter(
             store=store,
             github=github,
         )
@@ -158,11 +179,22 @@ class LocalGitHubQueue:
     def retry_event(self, event_id, claim_token, error):
         assert self._store.retry_event(event_id, claim_token, error)
 
-    def complete_task(self, task_id):
-        return self._completion(task_id)
+    def complete_task(
+        self,
+        task_id: str,
+        no_ci_resolution: Mapping[str, object] | None = None,
+    ):
+        return self._completion(task_id, no_ci_resolution)
+
+    def start_task(self, task_id):
+        return self._start(task_id)
 
 
 def _local_task_service(tmp_path, store, github):
+    class LocalAgentRosterStore:
+        def resolve_for_task(self, _task_id):
+            return {"revision": 0, "profiles": {}}
+
     operations = WorkflowOperations(
         gather_context=lambda _: {"summary": "Context gathered"},
         create_plan=lambda _: {"summary": "Plan created"},
@@ -191,6 +223,7 @@ def _local_task_service(tmp_path, store, github):
         tmp_path / "langgraph.sqlite",
         operations,
         publish_pr=publish_pr,
+        agent_roster_store=LocalAgentRosterStore(),
     )
 
 
@@ -287,6 +320,7 @@ def test_signed_github_deliveries_run_ready_ci_merge_lifecycle(tmp_path):
             assert ready.status_code == 200
             assert ready.json()["status"] == "queued"
             assert worker.process_one()
+            assert github.started_items == ["PVTI_test_item"]
 
             ci = _deliver(
                 client,
@@ -400,6 +434,7 @@ def test_pending_ci_blocks_a_successful_merge_event(tmp_path):
             )
             assert ready.json()["status"] == "queued"
             assert worker.process_one()
+            assert github.started_items == ["PVTI_test_item"]
 
             ci = _deliver(
                 client,

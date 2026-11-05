@@ -1,0 +1,12 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codefactory-database-migrations
+spec:
+  template:
+    spec:
+      containers:
+      - name: migrate
+        env:
+        - name: MIGRATION_PROFILE
+          value: inference-009-011

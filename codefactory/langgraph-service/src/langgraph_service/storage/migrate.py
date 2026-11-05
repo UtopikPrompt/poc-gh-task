@@ -10,16 +10,33 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from psycopg import ClientCursor, sql
 from sqlalchemy.engine import URL
 
-from langgraph_service.database import postgres_url_from_environment
+from langgraph_service.storage.database import postgres_url_from_environment
 
 MIGRATION_FILES = (
     "001_github_event_queue.sql",
     "001_checkpoint_schema.sql",
     "002_service_roles.sql",
     "002_agent_config.sql",
+    "003_agent_roster.sql",
     "003_github_task_installation.sql",
     "004_github_project_identity.sql",
+    "005_github_review_event.sql",
+    "006_github_human_feedback_reply.sql",
+    "007_github_agent_repair_requested.sql",
+    "008_langgraph_model_profile.sql",
+    "009_inference_instance_config.sql",
+    "010_inference_model_downloads.sql",
+    "011_inference_model_rollouts.sql",
 )
+INCREMENTAL_MIGRATION_FILES = (
+    "009_inference_instance_config.sql",
+    "010_inference_model_downloads.sql",
+    "011_inference_model_rollouts.sql",
+)
+MIGRATION_PROFILES = {
+    "full": MIGRATION_FILES,
+    "inference-009-011": INCREMENTAL_MIGRATION_FILES,
+}
 
 
 def _required(name: str) -> str:
@@ -68,6 +85,35 @@ def _ensure_login_role(
 def _apply_sql_file(connection: psycopg.Connection, path: Path) -> None:
     with ClientCursor(connection) as cursor:
         cursor.execute(path.read_text(encoding="utf-8"))
+
+
+def _migration_files(
+    profile: str,
+    migration_directory: Path,
+    *,
+    registered_files: tuple[str, ...] = MIGRATION_FILES,
+) -> tuple[Path, ...]:
+    if profile not in MIGRATION_PROFILES:
+        raise ValueError(f"unsupported MIGRATION_PROFILE: {profile}")
+    expected = MIGRATION_PROFILES[profile]
+    registered = tuple(name for name in registered_files if name in expected)
+    if registered != expected:
+        raise ValueError(f"migration order is invalid for profile {profile}")
+    paths = tuple(migration_directory / name for name in expected)
+    missing = tuple(path.name for path in paths if not path.is_file())
+    if missing:
+        raise FileNotFoundError(
+            f"migration files are missing for profile {profile}: {', '.join(missing)}"
+        )
+    return paths
+
+
+def _apply_migrations(
+    connection: psycopg.Connection, migrations: tuple[Path, ...]
+) -> None:
+    for migration_file in migrations:
+        with connection.transaction():
+            _apply_sql_file(connection, migration_file)
 
 
 def _set_migration_ready(connection: psycopg.Connection, ready: bool) -> None:
@@ -145,6 +191,8 @@ def run_migrations() -> None:
     postgres_url_from_environment("GITHUB", required=True)
     langgraph_url = postgres_url_from_environment("LANGGRAPH", required=True)
     migration_directory = Path(os.environ.get("MIGRATIONS_DIR", "/migrations"))
+    migration_profile = os.environ.get("MIGRATION_PROFILE", "full")
+    migrations = _migration_files(migration_profile, migration_directory)
 
     with psycopg.connect(_admin_url(), autocommit=True) as connection:
         _ensure_login_role(
@@ -158,8 +206,7 @@ def run_migrations() -> None:
             _required("LANGGRAPH_DB_PASSWORD"),
         )
         _set_migration_ready(connection, False)
-        for migration_file in MIGRATION_FILES:
-            _apply_sql_file(connection, migration_directory / migration_file)
+        _apply_migrations(connection, migrations)
         _grant_runtime_access(connection)
 
     checkpoint_setup_complete = False

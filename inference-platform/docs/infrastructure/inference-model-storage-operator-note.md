@@ -13,6 +13,13 @@ start a workload.
 - Workloads must mount that PVC read-only by setting `readOnly: true` on the
   container's `volumeMount`. The workload selects its own container mount path;
   this infrastructure bundle does not define one.
+- The downloader writes model files directly beneath the PV path. Its container
+  uses `MODEL_DIRECTORY=/storage`; inference containers mount the same PVC
+  read-only at `/models` and load from `/models/<filename>`.
+- The downloader runs in namespace `inference`, is pinned to `k8s-node01`, and
+  requires supplemental group GID `20000`. Prepare the `artifacts` directory
+  with the ownership, setgid, and group-write permissions described below; the
+  workload intentionally has no permission-fixing init container.
 
 ## Before applying
 
@@ -20,13 +27,19 @@ start a workload.
   `k8s-node01` and is mounted persistently across node restarts. The configured
   PV path is the dedicated subdirectory
   `/mnt/k8s-local-nvme/inference-models`, not the mount root.
-- An operator must create that directory on the node before the PV can be used.
-  Set its owner to `root`, its group to a deployment-selected inference-model
-  group, and its mode to `0750`. No numeric GID is defined by this repository;
-  choose one for the deployment and configure the future pod's
-  `supplementalGroups` to match. Do not use a privileged init container to
-  change host permissions. Preserve the existing mount root's `root:root`
-  ownership and `0700` mode; do not broaden its permissions.
+- The node must have the dedicated `inference-model-downloaders` group at GID
+  `20000`. Set the mount root to `root:inference-model-downloaders`, with group
+  read/write/execute and setgid (`2770`). Set existing directories/files to
+  owner `root`, group `inference-model-downloaders`, with group-write access and
+  setgid on directories. Leave existing UIDs and symlink inodes unchanged. A downloader
+  must use supplemental GID `20000` and `umask 0002` so new artifacts inherit
+  the group and remain group-writable. Do not use a privileged init container
+  to change host permissions.
+- Every inference pod using this PVC must set
+  `spec.securityContext.supplementalGroups: [20000]` for model read access, and
+  every inference container must mount the PVC with `readOnly: true`. A
+  separately approved downloader must also use supplemental GID `20000` to
+  write artifacts. Do not make inference mounts writable.
 - Confirm the directory's owner, group, and mode, and that no other PV, PVC, or
   StorageClass has been created with these names. The manifest creates the
   `inference` namespace; the future inference pod and PVC must use that
@@ -36,7 +49,7 @@ Read-only checks for the node and prepared directory:
 
 ```sh
 findmnt --target /mnt/k8s-local-nvme
-stat -c '%U:%G %a %n' /mnt/k8s-local-nvme/inference-models
+stat -c '%U:%G %a %n' /mnt/k8s-local-nvme /mnt/k8s-local-nvme/inference-models
 ```
 
 Review the resource definitions without persisting them:

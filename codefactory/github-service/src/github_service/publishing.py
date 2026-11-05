@@ -269,6 +269,21 @@ class ProposalGitHubAPI(Protocol):
         installation_id: int,
     ) -> Mapping[str, object]: ...
 
+    def update_pull_request_body(
+        self,
+        repository: str,
+        number: int,
+        body: str,
+        installation_id: int,
+    ) -> Mapping[str, object]: ...
+
+    def get_pull_request_ci(
+        self,
+        repository: str,
+        pull_request_number: int,
+        installation_id: int,
+    ) -> Mapping[str, object]: ...
+
 
 class GitHubTaskPublisher:
     def __init__(self, *, store: PublishingStore, github: ProposalGitHubAPI):
@@ -290,7 +305,7 @@ class GitHubTaskPublisher:
         ):
             raise ValueError("task context has an invalid target repository")
         installation_id = normalize_installation_id(context.get("installation_id"))
-        self._verify_active_task(context, repository, installation_id)
+        issue_number = self._verify_active_task(context, repository, installation_id)
 
         repository_info = self._github.get_repository(repository, installation_id)
         if not _same_repository(repository_info.get("full_name"), repository):
@@ -366,6 +381,7 @@ class GitHubTaskPublisher:
         if not changed and branch_ref is None:
             raise ValueError("proposal produces no changes against the base branch")
 
+        branch_head_sha = parent_sha
         existing = self._existing_pull_request(
             proposal.task_id,
             repository,
@@ -413,13 +429,35 @@ class GitHubTaskPublisher:
             commit_sha = commit.get("sha")
             if not isinstance(commit_sha, str) or not commit_sha:
                 raise TypeError("GitHub did not return a valid commit identity")
+            branch_head_sha = commit_sha
             if branch_ref is None:
                 self._github.create_ref(repository, branch, commit_sha, installation_id)
             else:
                 self._github.update_ref(repository, branch, commit_sha, installation_id)
 
+        issue_reference = f"Closes {repository}#{issue_number}"
         if existing is not None:
             result = existing
+            existing_body = result.get("body")
+            if existing_body is None:
+                existing_body = ""
+            elif not isinstance(existing_body, str):
+                raise TypeError("GitHub did not return the pull request body")
+            if issue_reference not in existing_body.splitlines():
+                updated_body = f"{existing_body.rstrip()}\n\n{issue_reference}".lstrip()
+                result = self._github.update_pull_request_body(
+                    repository,
+                    result["number"],
+                    updated_body,
+                    installation_id,
+                )
+                result = self._verify_pull_request(
+                    result,
+                    repository,
+                    branch,
+                    base,
+                    expected_id=existing.get("pull_request_id"),
+                )
         else:
             body = "This pull request contains a bounded file-change proposal."
             if proposal.summary:
@@ -429,6 +467,7 @@ class GitHubTaskPublisher:
                     f"{proposal.risk_summary}\n\n"
                     "This summary is advisory and does not add a merge gate."
                 )
+            body += f"\n\n{issue_reference}"
             result = self._github.create_pull_request(
                 repository=repository,
                 title="Automated changes for project task",
@@ -459,14 +498,32 @@ class GitHubTaskPublisher:
             proposal.task_id,
             pull_request_id,
         )
-        return dict(result)
+        ci = self._github.get_pull_request_ci(repository, number, installation_id)
+        checks = ci.get("ci_checks")
+        ci_complete = ci.get("ci_complete")
+        if (
+            str(ci.get("pull_request_id")) != pull_request_id
+            or not isinstance(checks, list)
+            or any(not isinstance(check, Mapping) for check in checks)
+            or not isinstance(ci_complete, bool)
+        ):
+            raise TypeError("GitHub returned an invalid pull request CI snapshot")
+        return {
+            **dict(result),
+            "head_sha": branch_head_sha,
+            "ci_head_sha": ci.get("head_sha")
+            if isinstance(ci.get("head_sha"), str)
+            else None,
+            "ci_checks": [dict(check) for check in checks],
+            "ci_complete": ci_complete,
+        }
 
     def _verify_active_task(
         self,
         context: Mapping[str, str],
         repository: str,
         installation_id: int,
-    ) -> None:
+    ) -> int:
         item_id = context.get("project_item_id")
         project_id = context.get("project_node_id")
         if not isinstance(item_id, str) or not item_id:
@@ -483,6 +540,13 @@ class GitHubTaskPublisher:
             or not _same_repository(issue.get("repository"), repository)
         ):
             raise ValueError("GitHub Project task no longer matches task context")
+        issue_number = issue.get("number")
+        if (
+            not isinstance(issue_number, int)
+            or isinstance(issue_number, bool)
+            or issue_number <= 0
+        ):
+            raise ValueError("GitHub Project task has an invalid issue number")
         status = item.get("status_option_name")
         done_status = item.get("done_option_name")
         if (
@@ -492,6 +556,7 @@ class GitHubTaskPublisher:
             or status == done_status
         ):
             raise ValueError("GitHub Project task is not verifiably active")
+        return issue_number
 
     def _existing_pull_request(
         self,

@@ -70,6 +70,8 @@ def _ci_summary(payload: object) -> tuple[str, bool | None]:
     complete = complete_value if isinstance(complete_value, bool) else None
     if "failure" in statuses:
         return "failure", complete
+    if complete is True and not statuses:
+        return "unavailable", complete
     if complete is True:
         return "success", complete
     return "pending", complete
@@ -487,6 +489,33 @@ class SQLiteDeliveryStore:
                 self._connection.rollback()
                 raise
 
+    def requeue_failed_task(self, task_id: str) -> bool:
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute(
+                    "SELECT o.event_id, o.state FROM task_event_inbox i "
+                    "JOIN task_event_outbox o USING (event_id) "
+                    "WHERE i.task_id = ? "
+                    "ORDER BY i.created_at DESC, i.ordinal DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if row is None or row["state"] != "dead":
+                    self._connection.commit()
+                    return False
+                cursor = self._connection.execute(
+                    "UPDATE task_event_outbox SET state = 'pending', attempts = 0, "
+                    "available_at = CURRENT_TIMESTAMP, lease_until = NULL, "
+                    "claim_token = NULL, last_error = NULL, completed_at = NULL "
+                    "WHERE event_id = ? AND state = 'dead'",
+                    (row["event_id"],),
+                )
+                self._connection.commit()
+                return cursor.rowcount == 1
+            except Exception:
+                self._connection.rollback()
+                raise
+
     def register_pull_request(
         self,
         repository: str,
@@ -890,6 +919,28 @@ class PostgresDeliveryStore:
                 "lease_until = NULL WHERE event_id = %s AND state = 'processing' "
                 "AND claim_token = %s",
                 (max_attempts, error[:2000], event_id, claim_token),
+            )
+            return cursor.rowcount == 1
+
+    def requeue_failed_task(self, task_id: str) -> bool:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT o.event_id, o.state FROM github_service.task_event_inbox i "
+                "JOIN github_service.task_event_outbox o USING (event_id) "
+                "WHERE i.task_id = %s "
+                "ORDER BY i.created_at DESC, i.ordinal DESC "
+                "LIMIT 1 FOR UPDATE OF o",
+                (task_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row["state"] != "dead":
+                return False
+            cursor.execute(
+                "UPDATE github_service.task_event_outbox SET state = 'pending', "
+                "attempts = 0, available_at = CURRENT_TIMESTAMP, lease_until = NULL, "
+                "claim_token = NULL, last_error = NULL, completed_at = NULL "
+                "WHERE event_id = %s AND state = 'dead'",
+                (row["event_id"],),
             )
             return cursor.rowcount == 1
 

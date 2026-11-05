@@ -85,6 +85,8 @@ def _normalize_and_validate_queued_event(webhook, api):
 
 def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
     requests = []
+    project_status = {"name": "Ready", "optionId": "option-ready"}
+    project_updates = []
     public_key = None
 
     def handle(request):
@@ -131,6 +133,10 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
                                                         "name": "Ready",
                                                     },
                                                     {
+                                                        "id": "option-in-progress",
+                                                        "name": "In Progress",
+                                                    },
+                                                    {
                                                         "id": "option-done",
                                                         "name": "Done",
                                                     },
@@ -150,8 +156,7 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
                                 "fieldValues": {
                                     "nodes": [
                                         {
-                                            "name": "Ready",
-                                            "optionId": "option-ready",
+                                            **project_status,
                                             "field": {
                                                 "id": "PVTSSF_status",
                                                 "name": "Status",
@@ -164,7 +169,17 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
                         }
                     },
                 )
-            assert body["variables"]["optionId"] == "option-done"
+            option_id = body["variables"]["optionId"]
+            project_updates.append(option_id)
+            project_status.update(
+                {
+                    "option-in-progress": {
+                        "name": "In Progress",
+                        "optionId": "option-in-progress",
+                    },
+                    "option-done": {"name": "Done", "optionId": "option-done"},
+                }.get(option_id, project_status)
+            )
             return httpx.Response(
                 200,
                 json={
@@ -266,6 +281,7 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
         assert item["project_owner_type"] == "organization"
         assert item["status_option_id"] == "option-ready"
         assert item["status_option_name"] == "Ready"
+        assert item["in_progress_option_id"] == "option-in-progress"
         assert item["is_archived"] is False
         assert item["done_option_name"] == "Done"
         assert item["issue"]["state"] == "OPEN"
@@ -294,8 +310,15 @@ def test_app_auth_project_status_update_and_latest_ci_results(tmp_path):
             "project_owner_type": "organization",
             "target_repository": "org/repo",
         }
+        started = client.mark_task_in_progress(task_state, 654)
+        assert "updateProjectV2ItemFieldValue" in started
+        assert client.mark_task_in_progress(task_state, 654) == {
+            "updated": False,
+            "status": "In Progress",
+        }
         update = client.mark_task_done(task_state, 654)
         assert "updateProjectV2ItemFieldValue" in update
+        assert project_updates == ["option-in-progress", "option-done"]
         assert (
             len(
                 [
@@ -380,8 +403,67 @@ def test_completion_revalidates_merged_pr_identity_and_current_checks(tmp_path):
         assert client.verify_pull_request_completion("org/repo", 17, "9001", 654) == {
             "verified": False
         }
+
+        client.get_pull_request_ci = lambda *_args: {
+            "pull_request_id": "9001",
+            "ci_checks": [],
+            "ci_complete": True,
+        }
+        assert client.verify_pull_request_completion("org/repo", 17, "9001", 654) == {
+            "verified": False
+        }
+        assert client.verify_pull_request_completion(
+            "org/repo",
+            17,
+            "9001",
+            654,
+            {
+                "actor": "verified-owner",
+                "decided_at": "2026-11-03T12:00:00+00:00",
+                "decision": "proceed_without_ci",
+                "pull_request_id": "9001",
+            },
+        ) == {"verified": True}
     finally:
         client.close()
+
+
+def test_empty_fully_paginated_ci_snapshot_is_complete_but_unavailable(tmp_path):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                201,
+                json={
+                    "token": "installation-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.url.path.endswith("/pulls/17"):
+            return httpx.Response(
+                200,
+                json={"id": 9001, "head": {"sha": "abc123"}},
+            )
+        if request.url.path.endswith("/check-runs"):
+            return httpx.Response(200, json={"check_runs": []})
+        return httpx.Response(200, json=[])
+
+    client, _ = _client(tmp_path, httpx.MockTransport(handle))
+    try:
+        ci = client.get_pull_request_ci("org/repo", 17, 654)
+    finally:
+        client.close()
+
+    assert ci == {
+        "pull_request_id": "9001",
+        "head_sha": "abc123",
+        "ci_checks": [],
+        "ci_complete": True,
+    }
+    assert any(request.url.path.endswith("/check-runs") for request in requests)
+    assert any(request.url.path.endswith("/statuses") for request in requests)
 
 
 def test_project_node_id_is_derived_from_resolved_webhook_item():
@@ -438,6 +520,7 @@ def test_ci_event_is_validated_against_contract_before_enqueue():
             assert installation_id == 654
             return {
                 "pull_request_id": "9001",
+                "head_sha": "abc123",
                 "ci_checks": [{"name": "required", "status": "success"}],
                 "ci_complete": True,
             }
@@ -478,6 +561,635 @@ def test_merged_event_is_validated_against_contract_before_enqueue():
 
     assert event["event_type"] == "merged"
     assert event["merged"] is True
+
+
+def test_changes_requested_review_queues_bounded_inline_feedback():
+    class FakeAPI:
+        def get_pull_request(self, repository, pull_request_number, installation_id):
+            assert (repository, pull_request_number, installation_id) == (
+                "org/repo",
+                17,
+                654,
+            )
+            return {"pull_request_id": "9001", "head_sha": "review-head"}
+
+        def get_pull_request_review_comments(
+            self, repository, pull_request_number, review_id, installation_id
+        ):
+            assert (repository, pull_request_number, review_id, installation_id) == (
+                "org/repo",
+                17,
+                1234,
+                654,
+            )
+            return [
+                {
+                    "id": 4461111142,
+                    "path": "README.md",
+                    "line": 4,
+                    "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+                    "body": "Please revert this unrelated change.",
+                }
+            ]
+
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review",
+            delivery_id="review-delivery-1",
+            installation_id=654,
+            payload={
+                "action": "submitted",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "review": {
+                    "id": 1234,
+                    "state": "changes_requested",
+                    "body": "",
+                },
+            },
+        ),
+        FakeAPI(),
+    )
+
+    assert event["event_type"] == "review_changes_requested"
+    assert event["event_pull_request_id"] == "9001"
+    assert event["event_head_sha"] == "review-head"
+    assert event["review_feedback"] == (
+        "Inline comment [review comment ID: 4461111142] on README.md:4:\n"
+        "Please revert this unrelated change."
+    )
+    assert event["review_comment_ids"] == ["4461111142"]
+    assert event["inline_review_contexts"]["4461111142"] == {
+        "path": "README.md",
+        "line": 4,
+        "diff_hunk": "@@ -1 +1 @@\n-old\n+new",
+    }
+
+
+def test_changes_requested_review_without_feedback_queues_fallback():
+    class FakeAPI:
+        def get_pull_request(self, *_args):
+            return {"pull_request_id": "9001", "head_sha": "review-head"}
+
+        def get_pull_request_review_comments(self, *_args):
+            return []
+
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review",
+            delivery_id="review-delivery-empty-feedback",
+            installation_id=654,
+            payload={
+                "action": "submitted",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "review": {
+                    "id": 1234,
+                    "state": "changes_requested",
+                    "body": "  ",
+                },
+            },
+        ),
+        FakeAPI(),
+    )
+
+    assert event["event_type"] == "review_changes_requested"
+    assert event["review_feedback"] == (
+        "Reviewer requested changes but provided no details."
+    )
+
+
+@pytest.mark.parametrize(
+    "pull_request",
+    [
+        {"pull_request_id": "9001", "head_sha": ""},
+        {"pull_request_id": "different-pr", "head_sha": "review-head"},
+    ],
+)
+def test_changes_requested_review_requires_matching_current_pr_head(pull_request):
+    class FakeAPI:
+        def get_pull_request_review_comments(self, *_args):
+            return []
+
+        def get_pull_request(self, *_args):
+            return pull_request
+
+    with pytest.raises(TypeError, match="matching pull request head"):
+        _normalize_and_validate_queued_event(
+            GitHubWebhook(
+                event_name="pull_request_review",
+                delivery_id="review-delivery-invalid-head",
+                installation_id=654,
+                payload={
+                    "action": "submitted",
+                    "repository": {"full_name": "org/repo"},
+                    "pull_request": {"id": 9001, "number": 17},
+                    "review": {
+                        "id": 1234,
+                        "state": "changes_requested",
+                        "body": "Please make this correction.",
+                    },
+                },
+            ),
+            FakeAPI(),
+        )
+
+
+def test_changes_requested_review_without_nested_pull_request_number_is_ignored():
+    event = GitHubEventNormalizer(object(), ProjectEventConfig())(
+        GitHubWebhook(
+            event_name="pull_request_review",
+            delivery_id="review-delivery-missing-number",
+            installation_id=654,
+            payload={
+                "action": "submitted",
+                "repository": {"full_name": "org/repo"},
+                "number": 17,
+                "pull_request": {"id": 9001},
+                "review": {
+                    "id": 1234,
+                    "state": "changes_requested",
+                    "body": "Please address this review.",
+                },
+            },
+        ),
+        store=object(),
+    )
+
+    assert event is None
+
+
+def test_human_pr_comment_is_queued_as_feedback_reply():
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="issue_comment",
+            delivery_id="comment-delivery-1",
+            installation_id=654,
+            payload={
+                "action": "created",
+                "repository": {"full_name": "org/repo"},
+                "issue": {
+                    "id": 9001,
+                    "number": 17,
+                    "pull_request": {"url": "https://api.github.com/pulls/17"},
+                },
+                "comment": {
+                    "id": 4461111143,
+                    "body": "Yes, include archived records.",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        object(),
+    )
+
+    assert event["event_type"] == "human_feedback_reply"
+    assert event["event_pull_request_id"] == "9001"
+    assert event["human_feedback_reply"] == "Yes, include archived records."
+
+
+def test_edited_root_review_comment_with_agent_command_queues_repair_direction():
+    class FakeAPI:
+        def get_pull_request(self, repository, pull_request_number, installation_id):
+            assert (repository, pull_request_number, installation_id) == (
+                "org/repo",
+                17,
+                654,
+            )
+            return {"pull_request_id": "9001", "head_sha": "current-head"}
+
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="agent-repair-delivery",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "comment": {
+                    "id": 4461111142,
+                    "body": "/agent Those changes wasn't requested. Revert.",
+                    "path": "README.md",
+                    "line": 34,
+                    "start_line": 28,
+                    "side": "RIGHT",
+                    "diff_hunk": "@@ -28,7 +28,7 @@\n-├── source/\n+−── source/",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        FakeAPI(),
+    )
+
+    assert event["event_type"] == "agent_repair_requested"
+    assert event["event_pull_request_id"] == "9001"
+    assert event["event_head_sha"] == "current-head"
+    assert event["repair_direction"] == "Those changes wasn't requested. Revert."
+    assert event["review_comment_ids"] == ["4461111142"]
+    assert event["inline_review_context"] == {
+        "path": "README.md",
+        "line": 34,
+        "start_line": 28,
+        "side": "RIGHT",
+        "diff_hunk": "@@ -28,7 +28,7 @@\n-├── source/\n+−── source/",
+    }
+    assert "human_feedback_reply" not in event
+
+
+def test_created_agent_reply_queues_repair_on_inline_thread_root():
+    class FakeAPI:
+        def get_pull_request(self, repository, pull_request_number, installation_id):
+            assert (repository, pull_request_number, installation_id) == (
+                "org/repo",
+                17,
+                654,
+            )
+            return {"pull_request_id": "9001", "head_sha": "current-head"}
+
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="agent-reply-delivery",
+            installation_id=654,
+            payload={
+                "action": "created",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "comment": {
+                    "id": 4462864676,
+                    "in_reply_to_id": 4461111142,
+                    "body": "/agent Restore the README tree block to the PR base version. Keep all entries; only restore the original tree connector characters.",
+                    "path": "README.md",
+                    "line": 34,
+                    "start_line": 28,
+                    "side": "RIGHT",
+                    "diff_hunk": "@@ -28,7 +28,7 @@\n-├── source/\n+−── source/",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        FakeAPI(),
+    )
+
+    assert event["event_type"] == "agent_repair_requested"
+    assert event["event_pull_request_id"] == "9001"
+    assert event["event_head_sha"] == "current-head"
+    assert event["repair_direction"] == (
+        "Restore the README tree block to the PR base version. Keep all entries; "
+        "only restore the original tree connector characters."
+    )
+    assert event["review_comment_ids"] == ["4461111142"]
+    assert event["command_comment_id"] == "4462864676"
+    assert event["inline_review_context"] == {
+        "path": "README.md",
+        "line": 34,
+        "start_line": 28,
+        "side": "RIGHT",
+        "diff_hunk": "@@ -28,7 +28,7 @@\n-├── source/\n+−── source/",
+    }
+    assert "human_feedback_reply" not in event
+
+
+def test_agent_repair_fetches_inline_hunk_when_webhook_omits_it():
+    class FakeAPI:
+        def get_pull_request(self, *_args):
+            return {"pull_request_id": "9001", "head_sha": "current-head"}
+
+        def get_pull_request_review_comments(self, *args):
+            assert args == ("org/repo", 17, 1234, 654)
+            return [
+                {
+                    "id": 4461111142,
+                    "path": "README.md",
+                    "line": 34,
+                    "start_line": 28,
+                    "side": "RIGHT",
+                    "diff_hunk": "@@ -28,7 +28,7 @@\n-├── source/\n+−── source/",
+                }
+            ]
+
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="agent-repair-hunk-fallback",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "comment": {
+                    "id": 4461111142,
+                    "pull_request_review_id": 1234,
+                    "body": "/agent Those changes wasn't requested. Revert.",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        FakeAPI(),
+    )
+
+    assert event["inline_review_context"]["path"] == "README.md"
+    assert event["inline_review_context"]["line"] == 34
+    assert event["inline_review_context"]["diff_hunk"].startswith("@@ -28")
+
+
+@pytest.mark.parametrize(
+    ("action", "body", "reply_to_id", "sender"),
+    [
+        ("edited", "Please revert this.", None, {"type": "User"}),
+        ("edited", "/agent", None, {"type": "User"}),
+        ("edited", "/agentx Please revert this.", None, {"type": "User"}),
+        ("edited", "/agent Please revert this.", 4461111141, {"type": "User"}),
+        ("edited", "/agent Please revert this.", None, {"type": "Bot"}),
+        ("created", "/agent Please revert this.", None, {"type": "User"}),
+    ],
+)
+def test_review_comment_edit_requires_root_human_agent_command(
+    action, body, reply_to_id, sender
+):
+    comment = {"body": body}
+    if reply_to_id is not None:
+        comment["in_reply_to_id"] = reply_to_id
+    event = GitHubEventNormalizer(object(), ProjectEventConfig())(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="ignored-agent-command",
+            installation_id=654,
+            payload={
+                "action": action,
+                "comment": comment,
+                "sender": sender,
+            },
+        ),
+        object(),
+    )
+
+    assert event is None
+
+
+def test_agent_repair_request_requires_matching_current_pull_request_head():
+    class FakeAPI:
+        def get_pull_request(self, *_args):
+            return {"pull_request_id": "different-pr", "head_sha": "current-head"}
+
+    with pytest.raises(TypeError, match="matching pull request head"):
+        _normalize_and_validate_queued_event(
+            GitHubWebhook(
+                event_name="pull_request_review_comment",
+                delivery_id="agent-repair-wrong-pr",
+                installation_id=654,
+                payload={
+                    "action": "edited",
+                    "repository": {"full_name": "org/repo"},
+                    "pull_request": {"id": 9001, "number": 17},
+                    "comment": {
+                        "id": 4461111142,
+                        "body": "/agent Revert the change.",
+                    },
+                    "sender": {"login": "human-reviewer", "type": "User"},
+                },
+            ),
+            FakeAPI(),
+        )
+
+
+def test_human_review_comment_reply_is_queued_with_parent_comment_id():
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="review-comment-reply-delivery",
+            installation_id=654,
+            payload={
+                "action": "created",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "comment": {
+                    "id": 4461111143,
+                    "in_reply_to_id": 4461111142,
+                    "body": "Yes, revert that README change.",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        object(),
+    )
+
+    assert event["event_type"] == "human_feedback_reply"
+    assert event["human_feedback_reply"] == "Yes, revert that README change."
+    assert event["reply_to_comment_id"] == "4461111142"
+    assert event["reply_comment_id"] == "4461111143"
+    assert event["reply_action"] == "created"
+
+
+def test_edited_human_review_comment_reply_is_queued_as_answer_revision():
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="edited-review-comment-reply-delivery",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "comment": {
+                    "id": 4461111143,
+                    "in_reply_to_id": 4461111142,
+                    "body": "Yes, revert the README change completely.",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        object(),
+    )
+
+    assert event["event_type"] == "human_feedback_reply"
+    assert event["human_feedback_reply"] == "Yes, revert the README change completely."
+    assert event["reply_to_comment_id"] == "4461111142"
+    assert event["reply_comment_id"] == "4461111143"
+    assert event["reply_action"] == "edited"
+
+
+def test_edited_agent_review_comment_reply_is_not_an_explicit_repair_command():
+    event = _normalize_and_validate_queued_event(
+        GitHubWebhook(
+            event_name="pull_request_review_comment",
+            delivery_id="edited-agent-review-comment-reply-delivery",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "repository": {"full_name": "org/repo"},
+                "pull_request": {"id": 9001, "number": 17},
+                "comment": {
+                    "id": 4462864676,
+                    "in_reply_to_id": 4461111142,
+                    "body": "/agent Restore the README tree block.",
+                },
+                "sender": {"login": "human-reviewer", "type": "User"},
+            },
+        ),
+        object(),
+    )
+
+    assert event["event_type"] == "human_feedback_reply"
+    assert event["reply_action"] == "edited"
+    assert event["reply_to_comment_id"] == "4461111142"
+
+
+def test_bot_pr_comment_is_not_queued_as_feedback_reply():
+    event = GitHubEventNormalizer(object(), ProjectEventConfig())(
+        GitHubWebhook(
+            event_name="issue_comment",
+            delivery_id="comment-delivery-bot",
+            installation_id=654,
+            payload={
+                "action": "created",
+                "repository": {"full_name": "org/repo"},
+                "issue": {
+                    "id": 9001,
+                    "number": 17,
+                    "pull_request": {"url": "https://api.github.com/pulls/17"},
+                },
+                "comment": {"body": "Agent question"},
+                "sender": {"login": "codefactory[bot]", "type": "Bot"},
+            },
+        ),
+        object(),
+    )
+
+    assert event is None
+
+
+def test_pending_review_does_not_fetch_comments_or_queue_repair():
+    class FakeAPI:
+        def get_pull_request_review_comments(self, *_args):
+            raise AssertionError("draft reviews must not trigger repair")
+
+    event = GitHubEventNormalizer(FakeAPI(), ProjectEventConfig())(
+        GitHubWebhook(
+            event_name="pull_request_review",
+            delivery_id="review-delivery-pending",
+            installation_id=654,
+            payload={
+                "action": "edited",
+                "repository": {"full_name": "org/repo"},
+                "number": 17,
+                "pull_request": {"id": 9001},
+                "review": {"id": 1234, "state": "pending", "body": ""},
+            },
+        ),
+        object(),
+    )
+
+    assert event is None
+
+
+def test_review_comment_api_returns_comments_for_the_submitted_review(tmp_path):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                201,
+                json={
+                    "token": "installation-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            )
+        assert request.method == "GET"
+        assert request.url.path == ("/repos/org/repo/pulls/17/reviews/1234/comments")
+        return httpx.Response(
+            200,
+            json=[{"path": "README.md", "line": 4, "body": "Revert this."}],
+        )
+
+    client, _ = _client(tmp_path, httpx.MockTransport(handle))
+    try:
+        comments = client.get_pull_request_review_comments("org/repo", 17, 1234, 654)
+    finally:
+        client.close()
+
+    assert comments == [{"path": "README.md", "line": 4, "body": "Revert this."}]
+    assert len(requests) == 2
+
+
+def test_issue_comment_api_finds_dedupe_marker_and_creates_comment(tmp_path):
+    requests = []
+    marker = "<!-- codefactory-human-feedback:abc -->"
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                201,
+                json={
+                    "token": "installation-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.method == "GET":
+            assert request.url.path == "/repos/org/repo/issues/17/comments"
+            return httpx.Response(
+                200,
+                json=[{"id": 71, "body": f"Question?\n\n{marker}"}],
+            )
+        assert request.method == "POST"
+        assert request.url.path == "/repos/org/repo/issues/17/comments"
+        assert json.loads(request.content) == {"body": f"Question?\n\n{marker}"}
+        return httpx.Response(201, json={"id": 72, "body": "Question"})
+
+    client, _ = _client(tmp_path, httpx.MockTransport(handle))
+    try:
+        existing = client.find_issue_comment("org/repo", 17, marker, 654)
+        created = client.create_issue_comment(
+            "org/repo", 17, f"Question?\n\n{marker}", 654
+        )
+    finally:
+        client.close()
+
+    assert existing == "71"
+    assert created["id"] == 72
+    assert len(requests) == 3
+
+
+def test_review_comment_api_finds_marker_and_replies_to_source_comment(tmp_path):
+    requests = []
+    marker = "<!-- codefactory-human-feedback:abc -->"
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path.endswith("/access_tokens"):
+            return httpx.Response(
+                201,
+                json={
+                    "token": "installation-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.method == "GET":
+            assert request.url.path == "/repos/org/repo/pulls/17/comments"
+            return httpx.Response(
+                200,
+                json=[{"id": 71, "body": f"Question?\n\n{marker}"}],
+            )
+        assert request.method == "POST"
+        assert request.url.path == "/repos/org/repo/pulls/17/comments/55/replies"
+        assert json.loads(request.content) == {"body": f"Question?\n\n{marker}"}
+        return httpx.Response(201, json={"id": 72, "body": "Question"})
+
+    client, _ = _client(tmp_path, httpx.MockTransport(handle))
+    try:
+        existing = client.find_review_comment("org/repo", 17, marker, 654)
+        created = client.create_review_comment_reply(
+            "org/repo", 17, 55, f"Question?\n\n{marker}", 654
+        )
+    finally:
+        client.close()
+
+    assert existing == "71"
+    assert created["id"] == 72
+    assert len(requests) == 3
 
 
 def test_project_event_cannot_switch_an_existing_tasks_installation():
@@ -892,19 +1604,22 @@ def test_project_item_rejects_repository_unavailable_to_event_installation(tmp_p
 def test_git_data_and_pull_request_calls_use_non_force_installation_api(tmp_path):
     requests = []
 
-    def pull_request():
+    def pull_request(body="Proposal"):
         return {
             "id": 9001,
             "number": 17,
             "state": "open",
+            "body": body,
             "html_url": "https://github.example/example/project/pull/17",
             "repository": {"full_name": "example/project"},
             "head": {
                 "ref": "codefactory-task-abc",
+                "sha": "task-head",
                 "repo": {"full_name": "example/project"},
             },
             "base": {
                 "ref": "main",
+                "sha": "base-commit",
                 "repo": {"full_name": "example/project"},
             },
         }
@@ -950,6 +1665,9 @@ def test_git_data_and_pull_request_calls_use_non_force_installation_api(tmp_path
                 return httpx.Response(201, json=pull_request())
             return httpx.Response(200, json=[pull_request()])
         if path == "/repos/example/project/pulls/17":
+            if request.method == "PATCH":
+                body = json.loads(request.content)["body"]
+                return httpx.Response(200, json=pull_request(body))
             return httpx.Response(200, json=pull_request())
         raise AssertionError(f"unexpected GitHub request: {request.method} {path}")
 
@@ -982,6 +1700,12 @@ def test_git_data_and_pull_request_calls_use_non_force_installation_api(tmp_path
             client.get_pull_request("example/project", 17, 654)["pull_request_id"]
             == "9001"
         )
+        assert client.get_pull_request("example/project", 17, 654)["head_sha"] == (
+            "task-head"
+        )
+        assert client.get_pull_request("example/project", 17, 654)["base_sha"] == (
+            "base-commit"
+        )
         assert (
             client.find_pull_requests(
                 "example/project", "codefactory-task-abc", "main", 654
@@ -999,11 +1723,25 @@ def test_git_data_and_pull_request_calls_use_non_force_installation_api(tmp_path
             )["pull_request_id"]
             == "9001"
         )
+        assert (
+            client.update_pull_request_body(
+                "example/project", 17, "Proposal\n\nCloses example/project#17", 654
+            )["body"]
+            == "Proposal\n\nCloses example/project#17"
+        )
     finally:
         client.close()
 
     update = next(request for request in requests if request.method == "PATCH")
     assert json.loads(update.content) == {"sha": "task-commit", "force": False}
+    body_update = next(
+        request
+        for request in requests
+        if request.method == "PATCH" and request.url.path.endswith("/pulls/17")
+    )
+    assert json.loads(body_update.content) == {
+        "body": "Proposal\n\nCloses example/project#17"
+    }
     blob = next(
         request for request in requests if request.url.path.endswith("/git/blobs")
     )

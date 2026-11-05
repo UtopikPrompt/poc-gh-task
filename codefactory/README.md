@@ -25,6 +25,10 @@ service for path selection, planning, advisory risk summaries, and typed
 changes. The provider is local-only and fails closed on invalid or truncated
 output. GitHub Service independently validates source paths and proposals.
 
+Per-instance inference artifact requests, the durable downloader worker contract,
+and Prometheus-backed CPU/GPU metrics are documented in
+[`docs/inference-model-download-contract.md`](docs/inference-model-download-contract.md).
+
 Run the services, tests, and Kubernetes overlays from the repository root using
 the commands in the root README and Makefile. Cross-service tests live in
 `integration-tests/`; service-specific tests stay with their owning service.

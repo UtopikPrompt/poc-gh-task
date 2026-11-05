@@ -87,7 +87,7 @@
         "/api/workflows": {
             "get": {
                 "operationId": "listWorkflows",
-                "description": "Returns allowlisted workflow summaries from GitHub Service; issue content, event payloads, and failure details are never returned.",
+                "description": "Returns bounded allowlisted GitHub workflow summaries enriched with LangGraph lifecycle status and waiting state; issue content, event payloads, and failure details are never returned.",
                 "security": [
                     {
                         "portalSession": []
@@ -99,13 +99,53 @@
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "github-service.json#/components/schemas/WorkflowList"
+                                    "$ref": "#/components/schemas/WorkflowList"
                                 }
                             }
                         }
                     },
                     "401": {
                         "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/workflows/{task_id}/retry": {
+            "post": {
+                "operationId": "retryWorkflow",
+                "description": "Owner-only same-origin action to requeue a workflow event in the GitHub Service.",
+                "parameters": [
+                    {
+                        "name": "task_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                ],
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Workflow event requeued"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified organization owner and same-origin request required"
+                    },
+                    "409": {
+                        "description": "Workflow has no eligible dead event"
                     },
                     "503": {
                         "$ref": "#/components/responses/Unavailable"
@@ -184,6 +224,227 @@
                 }
             }
         },
+        "/api/inference-instances": {
+            "get": {
+                "operationId": "getInferenceInstances",
+                "description": "Owner-only view of desired GPU and CPU model metadata, with separate artifact download and deployment rollout states. Submitted URLs and hashes are not visible to ordinary organization members.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Per-instance model configuration",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PortalInferenceInstances"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified GitHub Organization Owner role required"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/inference-instances/{instance_id}": {
+            "put": {
+                "operationId": "updateInferenceInstance",
+                "description": "Owner-only same-origin update of one inference instance's desired model filename.",
+                "parameters": [
+                    {
+                        "name": "instance_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "gpu",
+                                "cpu"
+                            ]
+                        }
+                    }
+                ],
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/InferenceInstancePayload"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Desired model configuration saved"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified organization owner and same-origin request required"
+                    },
+                    "422": {
+                        "description": "Model filename was rejected"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/inference-instances/{instance_id}/model-downloads": {
+            "post": {
+                "operationId": "requestInferenceModelDownload",
+                "description": "Owner-only same-origin action. Persists one request per instance and returns its durable request ID; downloads are performed by the separate leased worker.",
+                "parameters": [
+                    {
+                        "name": "instance_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "gpu",
+                                "cpu"
+                            ]
+                        }
+                    }
+                ],
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/ModelDownloadPayload"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Durable download request queued",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PortalModelDownloadRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified organization owner and same-origin request required"
+                    },
+                    "409": {
+                        "description": "A model download or rollout is active for this instance"
+                    },
+                    "422": {
+                        "description": "Model URL, checksum, or filename was rejected"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/inference-model-downloads/{request_id}": {
+            "get": {
+                "operationId": "getInferenceModelDownloadStatus",
+                "description": "Owner-only status read. The response omits the submitted URL and SHA-256 and exposes only fixed public error messages.",
+                "parameters": [
+                    {
+                        "name": "request_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                ],
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Safe durable status",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PortalModelDownloadRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified GitHub Organization Owner role required"
+                    },
+                    "404": {
+                        "description": "Model download not found"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/inference-metrics": {
+            "get": {
+                "operationId": "getInferenceMetrics",
+                "description": "Returns per-instance CPU, RAM, GPU utilization, and VRAM metrics with explicit available, stale, and unavailable states.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Per-instance metrics",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/PortalInferenceMetrics"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
         "/api/executions": {
             "get": {
                 "operationId": "listLangGraphExecutions",
@@ -255,6 +516,46 @@
                     }
                 }
             }
+        },
+        "/api/executions/{thread_id}/resolve-no-ci": {
+            "post": {
+                "operationId": "resolveExecutionWithoutCI",
+                "description": "Owner-only same-origin action. The verified session identity and proceed_without_ci decision are recorded in LangGraph checkpoint history.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "thread_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "No-CI decision recorded"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified organization owner and same-origin request required"
+                    },
+                    "409": {
+                        "description": "Execution has no unresolved no-CI state"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
         }
     },
     "components": {
@@ -287,6 +588,331 @@
                         "maximum": 90,
                         "default": 45,
                         "description": "Existing local-model request timeout; applies to new workflow runs."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceInstancePayload": {
+                "type": "object",
+                "required": [
+                    "model_filename"
+                ],
+                "properties": {
+                    "model_filename": {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 205,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ModelDownloadPayload": {
+                "type": "object",
+                "required": [
+                    "model_filename",
+                    "model_url",
+                    "model_sha256"
+                ],
+                "properties": {
+                    "model_filename": {
+                        "$ref": "#/components/schemas/InferenceInstancePayload/properties/model_filename"
+                    },
+                    "model_url": {
+                        "type": "string",
+                        "format": "uri",
+                        "maxLength": 4096,
+                        "pattern": "^https://huggingface\\.co/"
+                    },
+                    "model_sha256": {
+                        "type": "string",
+                        "pattern": "^[A-Fa-f0-9]{64}$"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceInstanceRecord": {
+                "type": "object",
+                "required": [
+                    "config",
+                    "version",
+                    "updated_at",
+                    "updated_by"
+                ],
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "required": [
+                            "instance_id",
+                            "model_filename",
+                            "model_url",
+                            "model_sha256",
+                            "download_status",
+                            "download_request_id",
+                            "download_error",
+                            "rollout_status",
+                            "rollout_request_id",
+                            "rollout_error"
+                        ],
+                        "properties": {
+                            "instance_id": {
+                                "type": "string",
+                                "enum": [
+                                    "gpu",
+                                    "cpu"
+                                ]
+                            },
+                            "model_filename": {
+                                "$ref": "#/components/schemas/InferenceInstancePayload/properties/model_filename"
+                            },
+                            "model_url": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 4096
+                            },
+                            "model_sha256": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "pattern": "^[A-Fa-f0-9]{64}$"
+                            },
+                            "download_status": {
+                                "type": "string",
+                                "enum": [
+                                    "queued",
+                                    "downloading",
+                                    "verifying",
+                                    "ready",
+                                    "failed"
+                                ]
+                            },
+                            "download_request_id": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "format": "uuid"
+                            },
+                            "download_error": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 200
+                            },
+                            "rollout_status": {
+                                "type": "string",
+                                "enum": [
+                                    "not_requested",
+                                    "waiting_for_download",
+                                    "pending",
+                                    "rolling_out",
+                                    "ready",
+                                    "failed"
+                                ]
+                            },
+                            "rollout_request_id": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "format": "uuid"
+                            },
+                            "rollout_error": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 200
+                            }
+                        },
+                        "additionalProperties": false
+                    },
+                    "version": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "updated_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "format": "date-time"
+                    },
+                    "updated_by": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "PortalInferenceInstances": {
+                "type": "object",
+                "required": [
+                    "instances",
+                    "can_edit"
+                ],
+                "properties": {
+                    "instances": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": {
+                            "$ref": "#/components/schemas/InferenceInstanceRecord"
+                        }
+                    },
+                    "can_edit": {
+                        "type": "boolean"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "PortalModelDownloadRecord": {
+                "type": "object",
+                "required": [
+                    "request_id",
+                    "instance_id",
+                    "model_filename",
+                    "requested_by",
+                    "status",
+                    "public_error",
+                    "attempts",
+                    "created_at",
+                    "updated_at"
+                ],
+                "properties": {
+                    "request_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "instance_id": {
+                        "type": "string",
+                        "enum": [
+                            "gpu",
+                            "cpu"
+                        ]
+                    },
+                    "model_filename": {
+                        "type": "string"
+                    },
+                    "requested_by": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "queued",
+                            "downloading",
+                            "verifying",
+                            "ready",
+                            "failed"
+                        ]
+                    },
+                    "public_error": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 200
+                    },
+                    "attempts": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "created_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    },
+                    "updated_at": {
+                        "type": "string",
+                        "format": "date-time"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "PortalMetricValue": {
+                "type": "object",
+                "required": [
+                    "value",
+                    "status"
+                ],
+                "properties": {
+                    "value": {
+                        "type": [
+                            "number",
+                            "null"
+                        ]
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "available",
+                            "stale",
+                            "unavailable"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "PortalInferenceMetrics": {
+                "type": "object",
+                "required": [
+                    "instances"
+                ],
+                "properties": {
+                    "instances": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "instance_id",
+                                "cpu_utilization_percent",
+                                "ram_used_bytes",
+                                "gpu_utilization_percent",
+                                "vram_used_bytes",
+                                "vram_total_bytes",
+                                "sampled_at"
+                            ],
+                            "properties": {
+                                "instance_id": {
+                                    "type": "string",
+                                    "enum": [
+                                        "gpu",
+                                        "cpu"
+                                    ]
+                                },
+                                "cpu_utilization_percent": {
+                                    "$ref": "#/components/schemas/PortalMetricValue"
+                                },
+                                "ram_used_bytes": {
+                                    "$ref": "#/components/schemas/PortalMetricValue"
+                                },
+                                "gpu_utilization_percent": {
+                                    "$ref": "#/components/schemas/PortalMetricValue"
+                                },
+                                "vram_used_bytes": {
+                                    "$ref": "#/components/schemas/PortalMetricValue"
+                                },
+                                "vram_total_bytes": {
+                                    "$ref": "#/components/schemas/PortalMetricValue"
+                                },
+                                "sampled_at": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "format": "date-time"
+                                }
+                            },
+                            "additionalProperties": false
+                        }
                     }
                 },
                 "additionalProperties": false
@@ -360,6 +986,36 @@
                 },
                 "additionalProperties": false
             },
+            "NoCIResolutionSummary": {
+                "type": "object",
+                "required": [
+                    "actor",
+                    "decided_at",
+                    "decision",
+                    "pull_request_id"
+                ],
+                "properties": {
+                    "actor": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39
+                    },
+                    "decided_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "maxLength": 40
+                    },
+                    "decision": {
+                        "const": "proceed_without_ci"
+                    },
+                    "pull_request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                    }
+                },
+                "additionalProperties": false
+            },
             "ExecutionSummary": {
                 "type": "object",
                 "required": [
@@ -371,7 +1027,9 @@
                     "waiting_for",
                     "task_status",
                     "event_type",
-                    "event_status"
+                    "event_status",
+                    "next_nodes",
+                    "no_ci_resolution"
                 ],
                 "properties": {
                     "thread_id": {
@@ -399,6 +1057,29 @@
                             "integer",
                             "null"
                         ]
+                    },
+                    "next_nodes": {
+                        "type": "array",
+                        "maxItems": 14,
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "dispatch",
+                                "validate_task",
+                                "context",
+                                "plan",
+                                "risk",
+                                "change",
+                                "publish_pr",
+                                "await_ci",
+                                "record_ci",
+                                "repair",
+                                "human_merge_boundary",
+                                "record_merge",
+                                "record_completion",
+                                "record_no_ci_resolution"
+                            ]
+                        }
                     },
                     "workflow_status": {
                         "type": [
@@ -434,6 +1115,16 @@
                             "null"
                         ],
                         "maxLength": 160
+                    },
+                    "no_ci_resolution": {
+                        "oneOf": [
+                            {
+                                "$ref": "#/components/schemas/NoCIResolutionSummary"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
                     }
                 },
                 "additionalProperties": false
@@ -470,6 +1161,151 @@
                         "maxItems": 20,
                         "items": {
                             "$ref": "#/components/schemas/ExecutionSummary"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "WorkflowSummary": {
+                "type": "object",
+                "required": [
+                    "task_id",
+                    "issue_number",
+                    "repository",
+                    "pull_request_number",
+                    "pull_request_id",
+                    "latest_event",
+                    "latest_event_at",
+                    "delivery_id",
+                    "delivery_status",
+                    "status",
+                    "workflow_status",
+                    "waiting_for",
+                    "attempts",
+                    "has_failure",
+                    "pull_request_merged",
+                    "ci_status",
+                    "ci_complete"
+                ],
+                "properties": {
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "issue_number": {
+                        "type": "null"
+                    },
+                    "repository": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "pull_request_number": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ],
+                        "minimum": 1
+                    },
+                    "pull_request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "latest_event": {
+                        "enum": [
+                            "ready",
+                            "ci",
+                            "merged",
+                            "review_changes_requested",
+                            "human_feedback_reply",
+                            "agent_repair_requested"
+                        ]
+                    },
+                    "latest_event_at": {
+                        "type": "string"
+                    },
+                    "delivery_id": {
+                        "type": "string"
+                    },
+                    "delivery_status": {
+                        "enum": [
+                            "processing",
+                            "accepted",
+                            "failed",
+                            "unavailable"
+                        ],
+                        "description": "Webhook-delivery processing state, distinct from event queue status."
+                    },
+                    "status": {
+                        "enum": [
+                            "queued",
+                            "processing",
+                            "processed",
+                            "failed",
+                            "unavailable"
+                        ],
+                        "description": "Processing state of the latest normalized task event, not workflow lifecycle status."
+                    },
+                    "workflow_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160,
+                        "description": "LangGraph task lifecycle state."
+                    },
+                    "waiting_for": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "maxLength": 160,
+                        "description": "External input or action currently blocking the task lifecycle."
+                    },
+                    "attempts": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "has_failure": {
+                        "type": "boolean"
+                    },
+                    "pull_request_merged": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "ci_status": {
+                        "enum": [
+                            "unknown",
+                            "success",
+                            "pending",
+                            "failure",
+                            "unavailable"
+                        ]
+                    },
+                    "ci_complete": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "WorkflowList": {
+                "type": "object",
+                "required": [
+                    "workflows"
+                ],
+                "properties": {
+                    "workflows": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "$ref": "#/components/schemas/WorkflowSummary"
                         }
                     }
                 },

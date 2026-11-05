@@ -126,10 +126,38 @@ class GitHubServiceClient:
             raise TypeError("GitHub service returned invalid source candidates")
         return [dict(item) for item in paths]
 
-    def source_files(self, task_id: str, paths: Sequence[str]) -> list[dict[str, str]]:
+    def source_files(
+        self,
+        task_id: str,
+        paths: Sequence[str],
+        *,
+        pull_request_number: int | None = None,
+        expected_pull_request_id: str | None = None,
+    ) -> list[dict[str, str]]:
+        if (pull_request_number is None) != (expected_pull_request_id is None):
+            raise ValueError(
+                "pull request number and identity must be supplied together"
+            )
+        payload: dict[str, object] = {"task_id": task_id, "paths": list(paths)}
+        if pull_request_number is not None:
+            if (
+                not isinstance(pull_request_number, int)
+                or isinstance(pull_request_number, bool)
+                or pull_request_number <= 0
+                or not isinstance(expected_pull_request_id, str)
+                or not expected_pull_request_id.isdecimal()
+                or int(expected_pull_request_id) <= 0
+            ):
+                raise ValueError("pull request source identity is invalid")
+            payload.update(
+                {
+                    "pull_request_number": pull_request_number,
+                    "expected_pull_request_id": expected_pull_request_id,
+                }
+            )
         response = self._client.post(
             "/internal/github/source-files",
-            json={"task_id": task_id, "paths": list(paths)},
+            json=payload,
         )
         response.raise_for_status()
         result = response.json()
@@ -147,15 +175,58 @@ class GitHubServiceClient:
             normalized.append({"path": path, "content": content})
         return normalized
 
-    def complete_task(self, task_id: str) -> dict[str, object]:
+    def request_human_feedback(
+        self,
+        *,
+        task_id: str,
+        question: str,
+        dedupe_key: str,
+        source_review_comment_id: int | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "task_id": task_id,
+            "question": question,
+            "dedupe_key": dedupe_key,
+        }
+        if source_review_comment_id is not None:
+            payload["source_review_comment_id"] = source_review_comment_id
+        response = self._client.post(
+            "/internal/github/request-human-feedback",
+            json=payload,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub service returned an invalid feedback response")
+        return dict(result)
+
+    def complete_task(
+        self,
+        task_id: str,
+        no_ci_resolution: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        payload: dict[str, object] = {"task_id": task_id}
+        if no_ci_resolution is not None:
+            payload["no_ci_resolution"] = dict(no_ci_resolution)
         response = self._client.post(
             "/internal/github/complete-task",
-            json={"task_id": task_id},
+            json=payload,
         )
         response.raise_for_status()
         result = response.json()
         if not isinstance(result, Mapping):
             raise TypeError("GitHub service returned an invalid completion response")
+        return dict(result)
+
+    def start_task(self, task_id: str) -> dict[str, object]:
+        response = self._client.post(
+            "/internal/github/start-task",
+            json={"task_id": task_id},
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, Mapping):
+            raise TypeError("GitHub service returned an invalid task start response")
         return dict(result)
 
     def close(self) -> None:

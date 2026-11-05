@@ -53,6 +53,7 @@ if [[ "$oauth_only" != true ]]; then
       allowed["LANGGRAPH_DB_PASSWORD"] = 1
       allowed["GITHUB_WEBHOOK_SECRET"] = 1
       allowed["INTERNAL_SERVICE_TOKEN"] = 1
+      allowed["MODEL_RECONCILER_TOKEN"] = 1
     }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     !($1 in allowed) {
@@ -64,7 +65,7 @@ if [[ "$oauth_only" != true ]]; then
     exit 1
   fi
 
-  for key in POSTGRES_ADMIN_PASSWORD GITHUB_DB_PASSWORD LANGGRAPH_DB_PASSWORD GITHUB_WEBHOOK_SECRET INTERNAL_SERVICE_TOKEN; do
+  for key in POSTGRES_ADMIN_PASSWORD GITHUB_DB_PASSWORD LANGGRAPH_DB_PASSWORD GITHUB_WEBHOOK_SECRET INTERNAL_SERVICE_TOKEN MODEL_RECONCILER_TOKEN; do
     if ! awk -F= -v key="$key" '$1 == key && length(substr($0, index($0, "=") + 1)) > 0 { found = 1 } END { exit !found }' "$runtime_env"; then
       printf 'runtime-secrets.env must define a non-empty %s entry.\n' "$key" >&2
       exit 1

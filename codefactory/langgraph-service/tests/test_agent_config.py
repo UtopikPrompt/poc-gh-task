@@ -8,6 +8,11 @@ def test_agent_config_defaults_to_supported_completion_timeout():
     assert AgentConfig().model_dump() == {"completion_timeout_seconds": 45}
 
 
+def test_agent_config_rejects_removed_global_model_profile():
+    with pytest.raises(ValidationError):
+        AgentConfig(model_profile="https://inference.example.com")
+
+
 @pytest.mark.parametrize("value", [1, 90])
 def test_agent_config_accepts_existing_timeout_bounds(value):
     assert (

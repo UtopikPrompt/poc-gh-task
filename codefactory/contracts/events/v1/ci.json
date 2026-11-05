@@ -6,6 +6,7 @@
         "task_id",
         "event_type",
         "event_pull_request_id",
+        "event_head_sha",
         "ci_checks",
         "ci_complete",
         "installation_id",
@@ -16,6 +17,7 @@
             "task_id": "PVTI_item",
             "event_type": "ci",
             "event_pull_request_id": "9001",
+            "event_head_sha": "abc123",
             "ci_checks": [
                 {
                     "name": "tests",
@@ -36,6 +38,10 @@
         },
         "event_pull_request_id": {
             "type": "string"
+        },
+        "event_head_sha": {
+            "type": "string",
+            "minLength": 1
         },
         "ci_checks": {
             "type": "array",
@@ -61,7 +67,8 @@
             }
         },
         "ci_complete": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when the fully queried check set is terminal, including an empty set; an empty set is unavailable CI and is never success."
         },
         "installation_id": {
             "type": "integer",

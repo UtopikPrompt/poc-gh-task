@@ -15,3 +15,4 @@ class WorkflowOperations:
     assess_risk: Operation | None = None
     prepare_changes: Operation | None = None
     repair_changes: Operation | None = None
+    request_human_feedback: Operation | None = None
