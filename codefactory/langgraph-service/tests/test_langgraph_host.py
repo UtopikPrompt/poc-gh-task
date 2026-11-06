@@ -6,6 +6,7 @@ import sys
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
 
+import httpx
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
 import pytest
@@ -36,6 +37,7 @@ def _configure(monkeypatch, module_name):
     monkeypatch.setenv("GITHUB_SERVICE_URL", "http://github-service:8000")
     monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "service-token")
     monkeypatch.setenv("MODEL_RECONCILER_TOKEN", "rollout-token")
+    monkeypatch.setenv("MODEL_ARTIFACT_API_URL", "http://model-artifacts.example.test")
     monkeypatch.setenv("WORKFLOW_OPERATIONS_MODULE", module_name)
 
 
@@ -187,6 +189,18 @@ def test_langgraph_readiness_exposes_local_model_unavailability(monkeypatch):
 def test_private_management_api_is_authenticated_and_projects_safe_state(monkeypatch):
     _configure(monkeypatch, "unused_worker_module")
     monkeypatch.delenv("WORKFLOW_OPERATIONS_MODULE")
+    metadata_urls = []
+    download_submissions = []
+
+    def resolve_metadata(url):
+        host.validate_download_url(url)
+        metadata_urls.append(url)
+        return (
+            "https://huggingface.co/org/repo/resolve/main/model.gguf?download=true",
+            "a" * 64,
+        )
+
+    monkeypatch.setattr(host, "resolve_huggingface_model_file", resolve_metadata)
 
     class ConfigStore:
         current = AgentConfigSnapshot(AgentConfig(), 0, None, None)
@@ -256,8 +270,37 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
         def get_all(self):
             return self.current
 
+        def create(self, config, *, created_by):
+            if config.instance_id in self.current:
+                raise ValueError("inference instance already exists")
+            snapshot = InferenceInstanceSnapshot(
+                config,
+                1,
+                datetime.now(timezone.utc),
+                created_by,
+            )
+            self.current[config.instance_id] = snapshot
+            return snapshot
+
+        def delete(self, instance_id):
+            if instance_id not in self.current:
+                raise ValueError("unknown inference instance")
+            if self.current[instance_id].config.rollout_status in {
+                "pending",
+                "rolling_out",
+            }:
+                raise ValueError("inference model rollout is active")
+            if len(self.current) <= 1:
+                raise ValueError("at least one inference instance must remain")
+            del self.current[instance_id]
+
         def update(self, config, *, updated_by):
             previous = self.current[config.instance_id]
+            config = InferenceInstanceConfig(
+                instance_id=config.instance_id,
+                model_filename=config.model_filename,
+                rollout_status="pending",
+            )
             self.current[config.instance_id] = InferenceInstanceSnapshot(
                 config,
                 previous.version + 1,
@@ -269,7 +312,6 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
     class ModelDownloadStore:
         request = SimpleNamespace(
             request_id=UUID("00000000-0000-0000-0000-000000000001"),
-            instance_id="gpu",
             model_filename="model.gguf",
             model_url="https://huggingface.co/org/repo/model.gguf?token=private-marker",
             model_sha256="a" * 64,
@@ -284,7 +326,8 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
         def __init__(self, _database_url):
             pass
 
-        def submit(self, **_kwargs):
+        def submit(self, **kwargs):
+            download_submissions.append(kwargs)
             return self.request
 
         def get(self, _request_id):
@@ -301,7 +344,7 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
             return SimpleNamespace(
                 event_id=UUID("00000000-0000-0000-0000-000000000002"),
                 instance_id="gpu",
-                download_request_id=self.request.request_id,
+                rollout_request_id=self.request.request_id,
                 model_filename="model.gguf",
                 config_version=1,
                 idempotency_key="gpu:1:00000000-0000-0000-0000-000000000001",
@@ -329,6 +372,13 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
     monkeypatch.setattr(host, "PostgresAgentRosterStore", RosterStore)
     monkeypatch.delenv("PROMETHEUS_URL", raising=False)
     app = host.create_app()
+    artifact_requests = []
+
+    def artifact_response(request):
+        artifact_requests.append(request)
+        return httpx.Response(200, json={"models": ["model.gguf"]})
+
+    app.state.model_artifact_http_transport = httpx.MockTransport(artifact_response)
 
     @asynccontextmanager
     async def no_lifespan(_app):
@@ -356,6 +406,7 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                 client.get("/internal/management/inference-instances").status_code
                 == 401
             )
+            unauthenticated_models = client.get("/internal/management/inference-models")
             headers = {"Authorization": "Bearer service-token"}
             initial = client.get("/internal/management/agent-config", headers=headers)
             updated = client.put(
@@ -378,27 +429,49 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
             initial_instances = client.get(
                 "/internal/management/inference-instances", headers=headers
             )
+            unauthenticated_instance_create = client.post(
+                "/internal/management/inference-instances",
+                json={
+                    "instance_id": "gpu-extra",
+                    "model_filename": "model.gguf",
+                    "created_by": "owner-login",
+                },
+            )
+            created_instance = client.post(
+                "/internal/management/inference-instances",
+                headers=headers,
+                json={
+                    "instance_id": "gpu-extra",
+                    "model_filename": "model.gguf",
+                    "created_by": "owner-login",
+                },
+            )
+            deleted_instance = client.delete(
+                "/internal/management/inference-instances/gpu-extra",
+                headers=headers,
+            )
+            available_models = client.get(
+                "/internal/management/inference-models", headers=headers
+            )
             unauthenticated_download = client.post(
-                "/internal/management/inference-instances/gpu/model-downloads",
+                "/internal/management/inference-model-downloads",
                 json={
                     "model_filename": "model.gguf",
                     "model_url": "https://huggingface.co/org/repo/model.gguf",
-                    "model_sha256": "a" * 64,
                     "requested_by": "owner-login",
                 },
             )
             rejected_download = client.post(
-                "/internal/management/inference-instances/gpu/model-downloads",
+                "/internal/management/inference-model-downloads",
                 headers=headers,
                 json={
                     "model_filename": "model.gguf",
                     "model_url": "https://user:credential-marker@huggingface.co/model",
-                    "model_sha256": "a" * 64,
                     "requested_by": "owner-login",
                 },
             )
             malformed_download = client.post(
-                "/internal/management/inference-instances/gpu/model-downloads",
+                "/internal/management/inference-model-downloads",
                 headers=headers,
                 json={
                     "model_filename": "model.gguf",
@@ -407,18 +480,26 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                 },
             )
             submitted_download = client.post(
-                "/internal/management/inference-instances/gpu/model-downloads",
+                "/internal/management/inference-model-downloads",
                 headers=headers,
                 json={
                     "model_filename": "model.gguf",
                     "model_url": "https://huggingface.co/org/repo/model.gguf",
-                    "model_sha256": "a" * 64,
                     "requested_by": "owner-login",
                 },
             )
             download_status = client.get(
                 "/internal/management/inference-model-downloads/00000000-0000-0000-0000-000000000001",
                 headers=headers,
+            )
+            legacy_download_route = client.post(
+                "/internal/management/inference-instances/gpu/model-downloads",
+                headers=headers,
+                json={
+                    "model_filename": "model.gguf",
+                    "model_url": "https://huggingface.co/org/repo/model.gguf",
+                    "requested_by": "owner-login",
+                },
             )
             unauthenticated_rollout_claim = client.post(
                 "/internal/reconciler/inference-model-rollouts/claim",
@@ -491,6 +572,12 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
             detail = client.get(
                 "/internal/management/executions/task-safe", headers=headers
             )
+            active_instance_delete = client.delete(
+                "/internal/management/inference-instances/gpu", headers=headers
+            )
+            missing_instance_delete = client.delete(
+                "/internal/management/inference-instances/gpu-extra", headers=headers
+            )
 
     assert initial.status_code == 200
     assert initial.json() == {
@@ -508,6 +595,18 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
     assert updated.json()["version"] == 1
     assert updated.json()["updated_by"] == "owner-login"
     assert initial_instances.status_code == updated_instance.status_code == 200
+    assert unauthenticated_instance_create.status_code == 401
+    assert created_instance.status_code == 201
+    assert created_instance.json()["config"]["instance_id"] == "gpu-extra"
+    assert deleted_instance.status_code == 200
+    assert deleted_instance.json() == {"deleted": True, "instance_id": "gpu-extra"}
+    assert active_instance_delete.status_code == 409
+    assert missing_instance_delete.status_code == 404
+    assert unauthenticated_models.status_code == 401
+    assert available_models.status_code == 200
+    assert available_models.json() == {"models": ["model.gguf"]}
+    assert len(artifact_requests) == 1
+    assert artifact_requests[0].headers["Authorization"] == "Bearer rollout-token"
     assert initial_instances.json()["instances"][0]["config"]["rollout_error"] == (
         "Model rollout failed; verify the inference deployment and retry."
     )
@@ -518,8 +617,19 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
     assert malformed_download.status_code == 422
     assert "credential-marker" not in malformed_download.text
     assert submitted_download.status_code == 202
+    assert legacy_download_route.status_code == 404
+    assert metadata_urls == ["https://huggingface.co/org/repo/model.gguf"]
+    assert download_submissions == [
+        {
+            "model_filename": "model.gguf",
+            "model_url": "https://huggingface.co/org/repo/resolve/main/model.gguf?download=true",
+            "model_sha256": "a" * 64,
+            "requested_by": "owner-login",
+        }
+    ]
     assert download_status.status_code == 200
     assert "model_url" not in submitted_download.json()
+    assert "instance_id" not in submitted_download.json()
     assert "private-marker" not in submitted_download.text
     assert download_status.json()["public_error"] == (
         "Model download failed; verify artifact availability and retry."

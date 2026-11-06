@@ -174,6 +174,78 @@
                         "description": "Inference configuration unavailable"
                     }
                 }
+            },
+            "post": {
+                "operationId": "createInferenceInstance",
+                "description": "Creates a saved instance configuration using an available shared GGUF filename; it does not provision a Deployment or start a model rollout.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/InferenceInstanceCreate"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Saved instance configuration created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InferenceInstanceRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "409": {
+                        "description": "Inference instance ID already exists"
+                    },
+                    "422": {
+                        "description": "Instance ID, model filename, or owner login was rejected"
+                    },
+                    "503": {
+                        "description": "Inference configuration unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/inference-models": {
+            "get": {
+                "operationId": "getAvailableInferenceModels",
+                "description": "Lists regular GGUF files present in shared inference artifact storage.",
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Available artifact filenames",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AvailableModelFilenames"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "503": {
+                        "description": "Available model listing unavailable"
+                    }
+                }
             }
         },
         "/internal/management/inference-instances/{instance_id}": {
@@ -191,10 +263,7 @@
                         "required": true,
                         "schema": {
                             "type": "string",
-                            "enum": [
-                                "gpu",
-                                "cpu"
-                            ]
+                            "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                         }
                     }
                 ],
@@ -225,12 +294,10 @@
                         "description": "Inference configuration unavailable"
                     }
                 }
-            }
-        },
-        "/internal/management/inference-instances/{instance_id}/model-downloads": {
-            "post": {
-                "operationId": "requestInferenceModelDownload",
-                "description": "Owner identity is supplied by the authenticated management portal. Enqueues a validated Hugging Face artifact; this API never downloads synchronously.",
+            },
+            "delete": {
+                "operationId": "deleteInferenceInstance",
+                "description": "Deactivates an instance configuration while retaining historical references. Active downloads, active rollouts, and deletion of the final active configuration are rejected.",
                 "security": [
                     {
                         "bearerAuth": []
@@ -243,11 +310,36 @@
                         "required": true,
                         "schema": {
                             "type": "string",
-                            "enum": [
-                                "gpu",
-                                "cpu"
-                            ]
+                            "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                         }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Instance configuration deactivated"
+                    },
+                    "401": {
+                        "description": "Internal service authentication required"
+                    },
+                    "404": {
+                        "description": "Active inference instance not found"
+                    },
+                    "409": {
+                        "description": "Instance has active work or is the last active configuration"
+                    },
+                    "503": {
+                        "description": "Inference configuration unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/management/inference-model-downloads": {
+            "post": {
+                "operationId": "requestSharedModelDownload",
+                "description": "Owner identity is supplied by the authenticated management portal. Enqueues a validated Hugging Face artifact in shared storage; this API never downloads synchronously or changes an inference instance.",
+                "security": [
+                    {
+                        "bearerAuth": []
                     }
                 ],
                 "requestBody": {
@@ -275,7 +367,7 @@
                         "description": "Internal service authentication required"
                     },
                     "409": {
-                        "description": "A download or rollout is active for this instance"
+                        "description": "A shared model download is already active"
                     },
                     "422": {
                         "description": "URL, SHA-256, or model filename was rejected"
@@ -719,10 +811,7 @@
                 "properties": {
                     "instance_id": {
                         "type": "string",
-                        "enum": [
-                            "gpu",
-                            "cpu"
-                        ]
+                        "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                     },
                     "model_filename": {
                         "type": "string",
@@ -731,6 +820,29 @@
                         "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$"
                     },
                     "updated_by": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 39
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceInstanceCreate": {
+                "type": "object",
+                "required": [
+                    "instance_id",
+                    "model_filename",
+                    "created_by"
+                ],
+                "properties": {
+                    "instance_id": {
+                        "type": "string",
+                        "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
+                    },
+                    "model_filename": {
+                        "$ref": "#/components/schemas/InferenceInstanceUpdate/properties/model_filename"
+                    },
+                    "created_by": {
                         "type": "string",
                         "minLength": 1,
                         "maxLength": 39
@@ -752,11 +864,6 @@
                         "required": [
                             "instance_id",
                             "model_filename",
-                            "model_url",
-                            "model_sha256",
-                            "download_status",
-                            "download_request_id",
-                            "download_error",
                             "rollout_status",
                             "rollout_request_id",
                             "rollout_error"
@@ -764,44 +871,10 @@
                         "properties": {
                             "instance_id": {
                                 "type": "string",
-                                "enum": [
-                                    "gpu",
-                                    "cpu"
-                                ]
+                                "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                             },
                             "model_filename": {
                                 "$ref": "#/components/schemas/InferenceInstanceUpdate/properties/model_filename"
-                            },
-                            "model_url": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "maxLength": 4096
-                            },
-                            "model_sha256": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "pattern": "^[A-Fa-f0-9]{64}$"
-                            },
-                            "download_status": {
-                                "$ref": "#/components/schemas/DownloadStatus"
-                            },
-                            "download_request_id": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "format": "uuid"
-                            },
-                            "download_error": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "maxLength": 200
                             },
                             "rollout_status": {
                                 "$ref": "#/components/schemas/RolloutStatus"
@@ -851,10 +924,24 @@
                 "properties": {
                     "instances": {
                         "type": "array",
-                        "minItems": 2,
-                        "maxItems": 2,
                         "items": {
                             "$ref": "#/components/schemas/InferenceInstanceRecord"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "AvailableModelFilenames": {
+                "type": "object",
+                "required": [
+                    "models"
+                ],
+                "properties": {
+                    "models": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$"
                         }
                     }
                 },
@@ -874,7 +961,6 @@
                 "type": "string",
                 "enum": [
                     "not_requested",
-                    "waiting_for_download",
                     "pending",
                     "rolling_out",
                     "ready",
@@ -898,7 +984,7 @@
                 "required": [
                     "event_id",
                     "instance_id",
-                    "download_request_id",
+                    "rollout_request_id",
                     "model_filename",
                     "config_version",
                     "idempotency_key",
@@ -913,12 +999,9 @@
                     },
                     "instance_id": {
                         "type": "string",
-                        "enum": [
-                            "gpu",
-                            "cpu"
-                        ]
+                        "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                     },
-                    "download_request_id": {
+                    "rollout_request_id": {
                         "type": "string",
                         "format": "uuid"
                     },
@@ -1015,7 +1098,6 @@
                 "required": [
                     "model_filename",
                     "model_url",
-                    "model_sha256",
                     "requested_by"
                 ],
                 "properties": {
@@ -1031,11 +1113,7 @@
                         "format": "uri",
                         "maxLength": 4096,
                         "pattern": "^https://huggingface\\.co/",
-                        "description": "Credential-free HTTPS URL on exactly huggingface.co; SHA-256 is mandatory. The worker validates redirects and public DNS destinations."
-                    },
-                    "model_sha256": {
-                        "type": "string",
-                        "pattern": "^[A-Fa-f0-9]{64}$"
+                        "description": "Credential-free HTTPS Hugging Face model or file URL. The service resolves the exact file's LFS SHA-256; the worker validates redirects and public DNS destinations."
                     },
                     "requested_by": {
                         "type": "string",
@@ -1050,7 +1128,6 @@
                 "type": "object",
                 "required": [
                     "request_id",
-                    "instance_id",
                     "model_filename",
                     "requested_by",
                     "status",
@@ -1063,13 +1140,6 @@
                     "request_id": {
                         "type": "string",
                         "format": "uuid"
-                    },
-                    "instance_id": {
-                        "type": "string",
-                        "enum": [
-                            "gpu",
-                            "cpu"
-                        ]
                     },
                     "model_filename": {
                         "type": "string"
@@ -1134,8 +1204,6 @@
                 "properties": {
                     "instances": {
                         "type": "array",
-                        "minItems": 2,
-                        "maxItems": 2,
                         "items": {
                             "type": "object",
                             "required": [
@@ -1150,10 +1218,7 @@
                             "properties": {
                                 "instance_id": {
                                     "type": "string",
-                                    "enum": [
-                                        "gpu",
-                                        "cpu"
-                                    ]
+                                    "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                                 },
                                 "cpu_utilization_percent": {
                                     "$ref": "#/components/schemas/MetricValue"

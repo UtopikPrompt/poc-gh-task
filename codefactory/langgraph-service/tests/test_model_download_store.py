@@ -98,7 +98,112 @@ def test_claim_uses_one_atomic_skip_locked_lease():
     assert "status = 'downloading'" in state["queries"][0]
 
 
-def test_nonterminal_transition_keeps_lease_and_terminal_transition_releases_it():
+def test_submit_creates_global_request_without_instance_or_config_mutation():
+    now = datetime.now(timezone.utc)
+    request_id = uuid4()
+    state = {"queries": [], "parameters": []}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, query, parameters=()):
+            state["queries"].append(query)
+            state["parameters"].append(parameters)
+
+        def fetchone(self):
+            if len(state["queries"]) == 1:
+                return None
+            return {
+                "request_id": request_id,
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/org/repo/model.gguf",
+                "model_sha256": "a" * 64,
+                "requested_by": "owner",
+                "status": "queued",
+                "public_error": None,
+                "attempts": 0,
+                "created_at": now,
+                "updated_at": now,
+            }
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    store = PostgresModelDownloadStore(
+        "postgresql://test", connection_factory=lambda *_args, **_kwargs: Connection()
+    )
+    request = store.submit(
+        model_filename="model.gguf",
+        model_url="https://huggingface.co/org/repo/model.gguf",
+        model_sha256="a" * 64,
+        requested_by="owner",
+    )
+
+    assert request.request_id == request_id
+    assert not hasattr(request, "instance_id")
+    assert "FOR UPDATE" in state["queries"][0]
+    assert "instance_id" in state["queries"][1]
+    assert "NULL" in state["queries"][1]
+    assert all("inference_instance_config" not in query for query in state["queries"])
+    assert all(
+        "inference_model_rollout_outbox" not in query for query in state["queries"]
+    )
+
+
+def test_submit_rejects_when_a_shared_download_is_already_active():
+    queries = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, query, _parameters=()):
+            queries.append(query)
+
+        def fetchone(self):
+            return {"request_id": uuid4()}
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    store = PostgresModelDownloadStore(
+        "postgresql://test", connection_factory=lambda *_args, **_kwargs: Connection()
+    )
+
+    with pytest.raises(ValueError, match="shared model download is already active"):
+        store.submit(
+            model_filename="model.gguf",
+            model_url="https://huggingface.co/org/repo/model.gguf",
+            model_sha256="a" * 64,
+            requested_by="owner",
+        )
+
+    assert len(queries) == 1
+    assert queries[0].startswith("SELECT request_id")
+
+
+def test_nonterminal_transition_and_completion_only_update_download_request():
     queries = []
 
     class Cursor:
@@ -135,19 +240,15 @@ def test_nonterminal_transition_keeps_lease_and_terminal_transition_releases_it(
     lease_token = uuid4()
 
     store.mark_verifying(request_id, lease_token)
-    verifying_query = queries[0]
     store.complete(request_id, lease_token)
-    ready_query = queries[2]
-    rollout_insert = queries[4]
+    verifying_query, ready_query = queries
 
     assert "lease_token = NULL" not in verifying_query
     assert "lease_until = NULL" not in verifying_query
     assert "lease_token = NULL" in ready_query
     assert "lease_until = NULL" in ready_query
-    assert "version = %s AND model_filename = %s" in queries[3]
-    assert (
-        "INSERT INTO langgraph_service.inference_model_rollout_outbox" in rollout_insert
-    )
+    assert all("inference_instance_config" not in query for query in queries)
+    assert all("inference_model_rollout_outbox" not in query for query in queries)
 
 
 def test_rollout_claim_is_version_qualified_and_uses_an_idempotent_lease():
@@ -173,7 +274,7 @@ def test_rollout_claim_is_version_qualified_and_uses_an_idempotent_lease():
                 return {
                     "event_id": event_id,
                     "instance_id": "cpu",
-                    "download_request_id": request_id,
+                    "rollout_request_id": request_id,
                     "model_filename": "cpu-model.gguf",
                     "config_version": 8,
                     "idempotency_key": f"cpu:8:{request_id}",
@@ -182,7 +283,7 @@ def test_rollout_claim_is_version_qualified_and_uses_an_idempotent_lease():
                 return {
                     "event_id": event_id,
                     "instance_id": "cpu",
-                    "download_request_id": request_id,
+                    "rollout_request_id": request_id,
                     "model_filename": "cpu-model.gguf",
                     "config_version": 8,
                     "idempotency_key": f"cpu:8:{request_id}",
@@ -208,14 +309,12 @@ def test_rollout_claim_is_version_qualified_and_uses_an_idempotent_lease():
     claimed = store.claim_rollout(lease_seconds=120)
 
     assert claimed.instance_id == "cpu"
-    assert claimed.download_request_id == request_id
+    assert claimed.rollout_request_id == request_id
     assert claimed.config_version == 8
     assert claimed.idempotency_key == f"cpu:8:{request_id}"
     assert claimed.lease_token == lease_token
     assert "config.version = event.config_version" in state["queries"][0]
-    assert (
-        "config.current_request_id = event.download_request_id" in state["queries"][1]
-    )
+    assert "config.rollout_request_id = event.rollout_request_id" in state["queries"][1]
     assert "FOR UPDATE OF event SKIP LOCKED" in state["queries"][1]
     assert "rollout_status = 'rolling_out'" in state["queries"][3]
 
@@ -237,7 +336,7 @@ def test_rollout_acknowledgment_replay_is_idempotent():
         def fetchone(self):
             return {
                 "event_id": event_id,
-                "download_request_id": uuid4(),
+                "rollout_request_id": uuid4(),
                 "instance_id": "gpu",
                 "model_filename": "gpu-model.gguf",
                 "config_version": 3,
@@ -274,7 +373,7 @@ def test_rollout_claim_rejects_too_long_lease():
         store.claim_rollout(lease_seconds=901)
 
 
-def test_download_failure_clears_rollout_waiting_state_for_current_request():
+def test_download_failure_updates_only_the_shared_request():
     queries = []
 
     class Cursor:
@@ -306,5 +405,5 @@ def test_download_failure_clears_rollout_waiting_state_for_current_request():
     store.fail(uuid4(), uuid4(), code="download_failed")
 
     assert "status IN ('downloading', 'verifying')" in queries[0]
-    assert "rollout_status = 'not_requested'" in queries[1]
-    assert "rollout_request_id = NULL" in queries[1]
+    assert len(queries) == 1
+    assert "inference_instance_config" not in queries[0]

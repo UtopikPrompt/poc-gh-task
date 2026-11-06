@@ -254,6 +254,84 @@
                         "$ref": "#/components/responses/Unavailable"
                     }
                 }
+            },
+            "post": {
+                "operationId": "createInferenceInstance",
+                "description": "Owner-only same-origin creation of saved instance metadata. The model must already be in shared storage; this does not provision a Deployment or roll out a model.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/InferenceInstanceCreatePayload"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Saved instance configuration created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InferenceInstanceRecord"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified organization owner and same-origin request required"
+                    },
+                    "409": {
+                        "description": "Inference instance ID already exists"
+                    },
+                    "422": {
+                        "description": "Model is unavailable or instance configuration was rejected"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/inference-models": {
+            "get": {
+                "operationId": "getAvailableInferenceModels",
+                "description": "Owner-only list of GGUF filenames present in shared inference artifact storage.",
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Available artifact filenames",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/AvailableModelFilenames"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified GitHub Organization Owner role required"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
             }
         },
         "/api/inference-instances/{instance_id}": {
@@ -267,10 +345,7 @@
                         "required": true,
                         "schema": {
                             "type": "string",
-                            "enum": [
-                                "gpu",
-                                "cpu"
-                            ]
+                            "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                         }
                     }
                 ],
@@ -306,12 +381,10 @@
                         "$ref": "#/components/responses/Unavailable"
                     }
                 }
-            }
-        },
-        "/api/inference-instances/{instance_id}/model-downloads": {
-            "post": {
-                "operationId": "requestInferenceModelDownload",
-                "description": "Owner-only same-origin action. Persists one request per instance and returns its durable request ID; downloads are performed by the separate leased worker.",
+            },
+            "delete": {
+                "operationId": "deleteInferenceInstance",
+                "description": "Owner-only same-origin deactivation of a saved instance configuration. Historical references are retained; active work and deletion of the last configuration are rejected.",
                 "parameters": [
                     {
                         "name": "instance_id",
@@ -319,13 +392,41 @@
                         "required": true,
                         "schema": {
                             "type": "string",
-                            "enum": [
-                                "gpu",
-                                "cpu"
-                            ]
+                            "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                         }
                     }
                 ],
+                "security": [
+                    {
+                        "portalSession": []
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Instance configuration deactivated"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "403": {
+                        "description": "Verified organization owner and same-origin request required"
+                    },
+                    "404": {
+                        "description": "Active inference instance not found"
+                    },
+                    "409": {
+                        "description": "Instance has active work or is the last active configuration"
+                    },
+                    "503": {
+                        "$ref": "#/components/responses/Unavailable"
+                    }
+                }
+            }
+        },
+        "/api/inference-model-downloads": {
+            "post": {
+                "operationId": "requestSharedModelDownload",
+                "description": "Owner-only same-origin action. Persists one global shared-storage request and returns its durable request ID; it does not change or roll out any inference instance.",
                 "security": [
                     {
                         "portalSession": []
@@ -359,7 +460,7 @@
                         "description": "Verified organization owner and same-origin request required"
                     },
                     "409": {
-                        "description": "A model download or rollout is active for this instance"
+                        "description": "A shared model download is already active"
                     },
                     "422": {
                         "description": "Model URL, checksum, or filename was rejected"
@@ -607,12 +708,28 @@
                 },
                 "additionalProperties": false
             },
+            "InferenceInstanceCreatePayload": {
+                "type": "object",
+                "required": [
+                    "instance_id",
+                    "model_filename"
+                ],
+                "properties": {
+                    "instance_id": {
+                        "type": "string",
+                        "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
+                    },
+                    "model_filename": {
+                        "$ref": "#/components/schemas/InferenceInstancePayload/properties/model_filename"
+                    }
+                },
+                "additionalProperties": false
+            },
             "ModelDownloadPayload": {
                 "type": "object",
                 "required": [
                     "model_filename",
-                    "model_url",
-                    "model_sha256"
+                    "model_url"
                 ],
                 "properties": {
                     "model_filename": {
@@ -623,10 +740,6 @@
                         "format": "uri",
                         "maxLength": 4096,
                         "pattern": "^https://huggingface\\.co/"
-                    },
-                    "model_sha256": {
-                        "type": "string",
-                        "pattern": "^[A-Fa-f0-9]{64}$"
                     }
                 },
                 "additionalProperties": false
@@ -645,11 +758,6 @@
                         "required": [
                             "instance_id",
                             "model_filename",
-                            "model_url",
-                            "model_sha256",
-                            "download_status",
-                            "download_request_id",
-                            "download_error",
                             "rollout_status",
                             "rollout_request_id",
                             "rollout_error"
@@ -657,57 +765,15 @@
                         "properties": {
                             "instance_id": {
                                 "type": "string",
-                                "enum": [
-                                    "gpu",
-                                    "cpu"
-                                ]
+                                "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                             },
                             "model_filename": {
                                 "$ref": "#/components/schemas/InferenceInstancePayload/properties/model_filename"
-                            },
-                            "model_url": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "maxLength": 4096
-                            },
-                            "model_sha256": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "pattern": "^[A-Fa-f0-9]{64}$"
-                            },
-                            "download_status": {
-                                "type": "string",
-                                "enum": [
-                                    "queued",
-                                    "downloading",
-                                    "verifying",
-                                    "ready",
-                                    "failed"
-                                ]
-                            },
-                            "download_request_id": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "format": "uuid"
-                            },
-                            "download_error": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "maxLength": 200
                             },
                             "rollout_status": {
                                 "type": "string",
                                 "enum": [
                                     "not_requested",
-                                    "waiting_for_download",
                                     "pending",
                                     "rolling_out",
                                     "ready",
@@ -760,8 +826,7 @@
                 "properties": {
                     "instances": {
                         "type": "array",
-                        "minItems": 2,
-                        "maxItems": 2,
+                        "minItems": 1,
                         "items": {
                             "$ref": "#/components/schemas/InferenceInstanceRecord"
                         }
@@ -772,11 +837,26 @@
                 },
                 "additionalProperties": false
             },
+            "AvailableModelFilenames": {
+                "type": "object",
+                "required": [
+                    "models"
+                ],
+                "properties": {
+                    "models": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\\.gguf$"
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
             "PortalModelDownloadRecord": {
                 "type": "object",
                 "required": [
                     "request_id",
-                    "instance_id",
                     "model_filename",
                     "requested_by",
                     "status",
@@ -789,13 +869,6 @@
                     "request_id": {
                         "type": "string",
                         "format": "uuid"
-                    },
-                    "instance_id": {
-                        "type": "string",
-                        "enum": [
-                            "gpu",
-                            "cpu"
-                        ]
                     },
                     "model_filename": {
                         "type": "string"
@@ -867,8 +940,6 @@
                 "properties": {
                     "instances": {
                         "type": "array",
-                        "minItems": 2,
-                        "maxItems": 2,
                         "items": {
                             "type": "object",
                             "required": [
@@ -883,10 +954,7 @@
                             "properties": {
                                 "instance_id": {
                                     "type": "string",
-                                    "enum": [
-                                        "gpu",
-                                        "cpu"
-                                    ]
+                                    "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
                                 },
                                 "cpu_utilization_percent": {
                                     "$ref": "#/components/schemas/PortalMetricValue"

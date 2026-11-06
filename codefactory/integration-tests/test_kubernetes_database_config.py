@@ -165,6 +165,17 @@ def test_postgres_and_migration_job_are_bundled_in_every_environment():
             "003_github_task_installation.sql"
             in job_spec["initContainers"][0]["args"][0]
         )
+        langgraph_migration_copy = job_spec["initContainers"][1]["args"][0]
+        assert "013_global_model_downloads.sql" in langgraph_migration_copy
+        assert "014_inference_model_apply.sql" in langgraph_migration_copy
+        assert "015_inference_instance_lifecycle.sql" in langgraph_migration_copy
+        if environment == "dev":
+            migration_profile = next(
+                item["value"]
+                for item in job_spec["containers"][0]["env"]
+                if item["name"] == "MIGRATION_PROFILE"
+            )
+            assert migration_profile == "inference-015"
         assert job_spec["containers"][0]["command"] == [
             "python",
             "-m",

@@ -27,15 +27,28 @@ MIGRATION_FILES = (
     "009_inference_instance_config.sql",
     "010_inference_model_downloads.sql",
     "011_inference_model_rollouts.sql",
+    "012_multiple_inference_instances.sql",
+    "013_global_model_downloads.sql",
+    "014_inference_model_apply.sql",
+    "015_inference_instance_lifecycle.sql",
 )
 INCREMENTAL_MIGRATION_FILES = (
     "009_inference_instance_config.sql",
     "010_inference_model_downloads.sql",
     "011_inference_model_rollouts.sql",
+    "012_multiple_inference_instances.sql",
 )
+MULTIPLE_INFERENCE_INSTANCES_MIGRATION_FILES = ("012_multiple_inference_instances.sql",)
+GLOBAL_MODEL_DOWNLOADS_MIGRATION_FILES = ("013_global_model_downloads.sql",)
+INFERENCE_MODEL_APPLY_MIGRATION_FILES = ("014_inference_model_apply.sql",)
+INFERENCE_INSTANCE_LIFECYCLE_MIGRATION_FILES = ("015_inference_instance_lifecycle.sql",)
 MIGRATION_PROFILES = {
     "full": MIGRATION_FILES,
-    "inference-009-011": INCREMENTAL_MIGRATION_FILES,
+    "inference-009-012": INCREMENTAL_MIGRATION_FILES,
+    "inference-012": MULTIPLE_INFERENCE_INSTANCES_MIGRATION_FILES,
+    "inference-013": GLOBAL_MODEL_DOWNLOADS_MIGRATION_FILES,
+    "inference-014": INFERENCE_MODEL_APPLY_MIGRATION_FILES,
+    "inference-015": INFERENCE_INSTANCE_LIFECYCLE_MIGRATION_FILES,
 }
 
 

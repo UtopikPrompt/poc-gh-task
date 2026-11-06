@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import ipaddress
+import httpx
 import os
 from pathlib import Path
 import re
@@ -14,13 +15,14 @@ import stat
 import time
 import ssl
 from typing import Callable
-from urllib.parse import parse_qsl, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urljoin, urlsplit
 
 MAX_ARTIFACT_BYTES = 100 * 1024**3
 MAX_REDIRECTS = 5
 DOWNLOAD_TIMEOUT_SECONDS = 30 * 60
 _MODEL_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf\Z")
 _SHA256 = re.compile(r"[A-Fa-f0-9]{64}\Z")
+_REVISION = re.compile(r"[A-Fa-f0-9]{40}\Z")
 _REDIRECT_HOST_SUFFIXES = (".huggingface.co", ".hf.co")
 _CREDENTIAL_QUERY_KEYS = {
     "access_token",
@@ -80,6 +82,130 @@ def validate_download_url(value: str) -> str:
             "model URL must use HTTPS on huggingface.co without credentials"
         )
     return value
+
+
+def resolve_huggingface_model_file(
+    value: str, *, client: httpx.Client | None = None
+) -> tuple[str, str]:
+    """Resolve one Hugging Face file URL to its immutable URL and LFS SHA-256."""
+    url = validate_download_url(value)
+    parsed = urlsplit(url)
+    raw_parts = parsed.path.split("/")[1:]
+    parts = [unquote(part) for part in raw_parts]
+    if len(parts) < 2 or any(
+        not part or part in {".", ".."} or "/" in part for part in parts
+    ):
+        raise ValueError("model URL does not identify a Hugging Face model file")
+
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    file_hints = [item for key, item in query if key == "show_file_info"]
+    if len(file_hints) > 1:
+        raise ValueError("model URL has an ambiguous file selection")
+    file_hint = file_hints[0] if file_hints else None
+    revision: str | None = None
+    file_parts: list[str]
+    if len(parts) == 2:
+        file_parts = []
+    elif parts[2] in {"resolve", "blob", "tree"}:
+        if len(parts) < 4:
+            raise ValueError("model URL does not identify a Hugging Face model file")
+        revision = parts[3]
+        file_parts = parts[4:]
+    else:
+        file_parts = parts[2:]
+
+    if file_hint is not None:
+        hint_parts = file_hint.split("/")
+        if (
+            not file_hint
+            or any(part in {"", ".", ".."} for part in hint_parts)
+            or (file_parts and "/".join(file_parts) not in {file_hint, hint_parts[-1]})
+        ):
+            raise ValueError("model URL file selection does not match its path")
+        if not file_parts:
+            file_parts = hint_parts
+    if not file_parts:
+        raise ValueError("model URL does not identify a Hugging Face model file")
+    file_path = "/".join(file_parts)
+    validate_model_filename(file_parts[-1])
+
+    api_base = "https://huggingface.co/api/models/" + "/".join(
+        quote(part, safe="") for part in parts[:2]
+    )
+
+    def resolve_with(metadata_client: httpx.Client) -> tuple[str, str]:
+        def get_json(endpoint: str, *, params: dict[str, str] | None = None):
+            try:
+                response = metadata_client.get(endpoint, params=params)
+                response.raise_for_status()
+                return response.json()
+            except (httpx.HTTPError, ValueError) as error:
+                raise ModelDownloadError(
+                    "Hugging Face model metadata could not be verified"
+                ) from error
+
+        selected_revision = revision
+        if selected_revision is None:
+            model = get_json(api_base)
+            selected_revision = model.get("sha") if isinstance(model, dict) else None
+            if not isinstance(selected_revision, str) or not _REVISION.fullmatch(
+                selected_revision
+            ):
+                raise ModelDownloadError(
+                    "Hugging Face model metadata could not be verified"
+                )
+
+        encoded_path = "/".join(quote(part, safe="") for part in file_parts)
+        encoded_parent = "/".join(quote(part, safe="") for part in file_parts[:-1])
+        tree_url = f"{api_base}/tree/{quote(selected_revision, safe='')}"
+        if encoded_parent:
+            tree_url += f"/{encoded_parent}"
+        entries = get_json(tree_url, params={"expand": "true"})
+        if not isinstance(entries, list):
+            raise ModelDownloadError(
+                "Hugging Face model metadata could not be verified"
+            )
+        matches = [
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("type") == "file"
+            and entry.get("path") == file_path
+        ]
+        if len(matches) != 1:
+            raise ModelDownloadError(
+                "Hugging Face model metadata could not be verified"
+            )
+        lfs = matches[0].get("lfs")
+        oid = lfs.get("oid") if isinstance(lfs, dict) else None
+        if isinstance(oid, str) and oid.startswith("sha256:"):
+            oid = oid.removeprefix("sha256:")
+        if not isinstance(oid, str) or not _SHA256.fullmatch(oid):
+            raise ModelDownloadError(
+                "Hugging Face model metadata could not be verified"
+            )
+
+        encoded_repository = "/".join(quote(part, safe="") for part in parts[:2])
+        download_url = (
+            f"https://huggingface.co/{encoded_repository}/resolve/"
+            f"{quote(selected_revision, safe='')}/{encoded_path}?download=true"
+        )
+        return download_url, oid.lower()
+
+    if client is not None:
+        return resolve_with(client)
+    try:
+        with httpx.Client(
+            timeout=15,
+            follow_redirects=False,
+            trust_env=False,
+            headers={"User-Agent": "CodefactoryModelMetadata/1.0"},
+        ) as metadata_client:
+            return resolve_with(metadata_client)
+    except httpx.HTTPError as error:
+        raise ModelDownloadError(
+            "Hugging Face model metadata could not be verified"
+        ) from error
 
 
 def _validate_redirect_url(value: str) -> str:

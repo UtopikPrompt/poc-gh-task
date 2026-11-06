@@ -5,6 +5,19 @@ const saveConfig = document.getElementById('save-config');
 const inferenceMessage = document.getElementById('inference-message');
 const inferenceMetricsBody = document.getElementById('inference-metrics-body');
 const inferenceMetricsMessage = document.getElementById('inference-metrics-message');
+const modelDownloadForm = document.getElementById('model-download-form');
+const modelDownloadFilename = document.getElementById('model-download-filename');
+const modelDownloadUrl = document.getElementById('model-download-url');
+const modelCatalogStatus = document.getElementById('model-catalog-status');
+const availableModels = document.getElementById('available-models');
+const downloadStatus = document.getElementById('download-status');
+const toastRegion = document.getElementById('toast-region');
+const inferenceInstanceList = document.getElementById('inference-instance-list');
+const inferenceInstanceTemplate = document.getElementById('inference-instance-template');
+const inferenceInstanceCreateForm = document.getElementById('inference-instance-create-form');
+const newInferenceInstanceId = document.getElementById('new-inference-instance-id');
+const newInferenceModel = document.getElementById('new-inference-model');
+const createInferenceInstanceButton = document.getElementById('create-inference-instance');
 const rosterMessage = document.getElementById('roster-message');
 const rosterAudit = document.getElementById('roster-audit');
 const rosterSummary = document.getElementById('roster-summary');
@@ -25,14 +38,29 @@ let canEditRoster = false;
 let canEditConfig = false;
 let savedTimeout = null;
 let canEditInference = false;
+let availableModelFilenames = [];
+let modelInventoryLoaded = false;
+let activeInferenceInstanceCount = 0;
+let toastTimeout = null;
+let modelDownloadFilenameManuallyEdited = false;
 const savedInferenceModels = {};
-const inferenceDownloads = {};
+let sharedDownload = { requestId: null, status: '', publicError: null };
 let rosterDraft = null;
 let rosterDirty = false;
 
 function setStatus(element, message, state = 'info') {
     element.textContent = message;
     element.dataset.state = state;
+}
+
+function showToast(message, state = 'info') {
+    toastRegion.textContent = message;
+    toastRegion.dataset.state = state;
+    toastRegion.hidden = false;
+    window.clearTimeout(toastTimeout);
+    toastTimeout = window.setTimeout(() => {
+        toastRegion.hidden = true;
+    }, 5000);
 }
 
 function updateConfigSaveState() {
@@ -81,8 +109,10 @@ async function saveAgentConfig(event) {
         if (!response.ok) throw new Error('unavailable');
         await loadAgentConfig({ quiet: true });
         setStatus(configMessage, 'Configuration saved for new workflow runs.', 'success');
+        showToast('Configuration saved for new workflow runs.', 'success');
     } catch {
         setStatus(configMessage, 'Configuration could not be saved.', 'error');
+        showToast('Configuration could not be saved.', 'error');
         updateConfigSaveState();
     }
 }
@@ -90,38 +120,96 @@ async function saveAgentConfig(event) {
 function updateInferenceSaveState(form) {
     const instance = form.dataset.instance;
     const input = form.elements.model_filename;
-    const active = ['queued', 'downloading', 'verifying'].includes(inferenceDownloads[instance]?.status)
-        || ['pending', 'rolling_out'].includes(form.dataset.rolloutStatus);
-    form.querySelector('button[type="submit"]').disabled = !canEditInference || (
-        active || input.value === savedInferenceModels[instance]
+    const status = form.dataset.rolloutStatus || 'not_requested';
+    const active = ['pending', 'rolling_out'].includes(status);
+    const unchanged = input.value === savedInferenceModels[instance];
+    const button = form.querySelector('button[type="submit"]');
+    const help = form.querySelector('.apply-model-help');
+    button.disabled = !canEditInference || (
+        active || !modelInventoryLoaded || !availableModelFilenames.includes(input.value)
+        || (unchanged && status === 'ready')
     );
+    help.textContent = active
+        ? 'A model rollout is already in progress.'
+        : !canEditInference
+            ? 'Organization owner access is required to apply models.'
+            : !modelInventoryLoaded
+                ? 'Model availability is unavailable; reload the catalog to enable Apply model.'
+                : !availableModelFilenames.includes(input.value)
+                    ? 'Select an available model to enable Apply model.'
+                    : unchanged && status === 'ready'
+                        ? 'This filename is already selected. Choose a different available model to enable Apply model.'
+                        : unchanged && status === 'failed'
+                            ? 'The previous rollout failed. Apply model to retry.'
+                            : unchanged && status === 'not_requested'
+                                ? 'No rollout has been requested for this selection. Apply model to request one.'
+                                : '';
 }
 
-function updateModelDownloadButton(form) {
-    const instance = form.dataset.instance;
-    const url = form.elements.model_url.value;
-    const digest = form.elements.model_sha256.value;
-    const filename = form.elements.model_filename.value;
+function updateInferenceDeleteState(form) {
+    const active = ['pending', 'rolling_out'].includes(form.dataset.rolloutStatus);
+    const button = form.querySelector('.delete-inference-instance');
+    button.disabled = !canEditInference || active || activeInferenceInstanceCount <= 1;
+    button.title = active
+        ? 'Wait for the active model rollout to finish.'
+        : activeInferenceInstanceCount <= 1
+            ? 'Keep at least one inference instance configuration.'
+            : 'Delete configuration';
+}
+
+function updateInferenceCreateState() {
+    const instanceId = newInferenceInstanceId.value;
+    const validId = /^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$/.test(instanceId);
+    const availableModel = availableModelFilenames.includes(newInferenceModel.value);
+    createInferenceInstanceButton.disabled = !canEditInference || !modelInventoryLoaded
+        || !validId || Object.hasOwn(savedInferenceModels, instanceId) || !availableModel;
+}
+
+function updateModelDownloadButton() {
+    const url = modelDownloadUrl.value;
+    const filename = modelDownloadFilename.value;
     let validUrl = false;
     try {
         const parsed = new URL(url);
         validUrl = parsed.protocol === 'https:' && parsed.hostname === 'huggingface.co'
             && !parsed.username && !parsed.password && !parsed.port && !parsed.hash;
     } catch { /* An empty or malformed URL is not ready to submit. */ }
-    const active = ['queued', 'downloading', 'verifying'].includes(inferenceDownloads[instance]?.status)
-        || ['pending', 'rolling_out'].includes(form.dataset.rolloutStatus);
-    form.querySelector('.download-model').disabled = !canEditInference || active
-        || !validUrl || !/^[A-Fa-f0-9]{64}$/.test(digest)
+    const active = ['resolving', 'queued', 'downloading', 'verifying'].includes(sharedDownload.status);
+    modelDownloadForm.querySelector('.download-model').disabled = !canEditInference || active
+        || !validUrl
         || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$/.test(filename);
 }
 
-function showDownloadStatus(form, status, error = null) {
-    const element = form.querySelector('.download-status');
-    element.dataset.state = status === 'failed' ? 'error'
+function suggestModelFilenameFromUrl() {
+    if (!modelDownloadFilenameManuallyEdited) {
+        let filename = '';
+        try {
+            const parsed = new URL(modelDownloadUrl.value);
+            if (parsed.protocol === 'https:' && parsed.hostname === 'huggingface.co'
+                && !parsed.username && !parsed.password && !parsed.port) {
+                const encodedBasename = parsed.pathname.split('/').pop();
+                const basename = decodeURIComponent(encodedBasename || '');
+                if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$/.test(basename)) {
+                    filename = basename;
+                }
+            }
+        } catch { /* Invalid URLs and invalid percent-encoding have no suggestion. */ }
+        modelDownloadFilename.value = filename;
+    }
+    updateModelDownloadButton();
+}
+
+function showDownloadStatus(status, error = null) {
+    downloadStatus.dataset.state = ['failed', 'resolution_failed'].includes(status) ? 'error'
         : status === 'ready' ? 'success'
-            : ['queued', 'downloading', 'verifying'].includes(status) ? 'loading' : 'info';
-    element.textContent = error || (status ? `Model download ${status}.` : 'No download requested.');
-    updateModelDownloadButton(form);
+            : ['resolving', 'queued', 'downloading', 'verifying'].includes(status) ? 'loading' : 'info';
+    const message = error || (status === 'resolving'
+        ? 'Checking Hugging Face file metadata...'
+        : status === 'queued'
+            ? 'Download queued; checksum metadata verified.'
+            : status ? `Model download ${status}.` : 'No download requested.');
+    downloadStatus.textContent = message;
+    updateModelDownloadButton();
 }
 
 function showRolloutStatus(form, status, error = null) {
@@ -129,16 +217,129 @@ function showRolloutStatus(form, status, error = null) {
     form.dataset.rolloutStatus = status || 'not_requested';
     element.dataset.state = status === 'failed' ? 'error'
         : status === 'ready' ? 'success'
-            : ['pending', 'rolling_out', 'waiting_for_download'].includes(status) ? 'loading' : 'info';
+            : ['pending', 'rolling_out'].includes(status) ? 'loading' : 'info';
     element.textContent = error || (status === 'not_requested'
         ? 'Model rollout not requested.'
         : `Model rollout ${status.replaceAll('_', ' ')}.`);
     updateInferenceSaveState(form);
-    updateModelDownloadButton(form);
+    updateInferenceDeleteState(form);
+    updateModelDownloadButton();
+}
+
+function createInferenceInstanceForm(instanceId) {
+    const form = inferenceInstanceTemplate.content.firstElementChild.cloneNode(true);
+    const kind = instanceId.startsWith('gpu') ? 'GPU' : 'CPU';
+    const prefix = `inference-${instanceId}`;
+    form.dataset.instance = instanceId;
+    form.querySelector('h3').textContent = `${kind} instance · ${instanceId}`;
+    for (const [name, suffix] of Object.entries({ model_filename: 'model-filename' })) {
+        const input = form.elements[name];
+        input.id = `${prefix}-${suffix}`;
+        form.querySelector(`label[for="${suffix}"]`).htmlFor = input.id;
+    }
+    const selectionStatus = form.querySelector('.model-selection-status');
+    selectionStatus.id = `${prefix}-model-selection-status`;
+    form.elements.model_filename.setAttribute('aria-describedby', selectionStatus.id);
+    const applyHelp = form.querySelector('.apply-model-help');
+    applyHelp.id = `${prefix}-apply-model-help`;
+    const applyButton = form.querySelector('button[type="submit"]');
+    applyButton.textContent = 'Apply model';
+    applyButton.setAttribute('aria-describedby', applyHelp.id);
+    form.addEventListener('submit', saveInferenceInstance);
+    form.elements.model_filename.addEventListener('change', () => updateInferenceSaveState(form));
+    form.querySelector('.delete-inference-instance').addEventListener('click', () => {
+        deleteInferenceInstance(instanceId);
+    });
+    return form;
+}
+
+function renderModelSelection(form, selectedFilename) {
+    const select = form.elements.model_filename;
+    select.replaceChildren();
+    const available = modelInventoryLoaded && availableModelFilenames.includes(selectedFilename);
+    for (const filename of availableModelFilenames) {
+        const option = document.createElement('option');
+        option.value = filename;
+        option.textContent = filename;
+        select.append(option);
+    }
+    if (!available) {
+        const option = document.createElement('option');
+        option.value = selectedFilename;
+        option.disabled = true;
+        option.textContent = modelInventoryLoaded
+            ? `${selectedFilename} (missing from shared model storage)`
+            : `${selectedFilename} (model availability unavailable)`;
+        select.append(option);
+    }
+    select.value = selectedFilename;
+    const status = form.querySelector('.model-selection-status');
+    status.dataset.state = !modelInventoryLoaded ? 'error' : available ? 'ready' : 'error';
+    status.textContent = !modelInventoryLoaded
+        ? 'Model availability is unavailable; the configured filename is retained.'
+        : available
+            ? `${availableModelFilenames.length} GGUF models available.`
+            : 'Configured file is missing from shared model storage. Choose an available model or request its download.';
+}
+
+function syncInferenceInstanceForms(instances) {
+    const existing = new Map([...inferenceInstanceList.querySelectorAll('.inference-instance')]
+        .map((form) => [form.dataset.instance, form]));
+    const instanceIds = new Set();
+    for (const instance of instances) {
+        const instanceId = instance.config.instance_id;
+        instanceIds.add(instanceId);
+        const form = existing.get(instanceId) || createInferenceInstanceForm(instanceId);
+        inferenceInstanceList.append(form);
+    }
+    for (const [instanceId, form] of existing) {
+        if (!instanceIds.has(instanceId)) form.remove();
+    }
+}
+
+function renderModelCatalog() {
+    availableModels.replaceChildren();
+    for (const filename of availableModelFilenames) {
+        const option = document.createElement('option');
+        option.value = filename;
+        availableModels.append(option);
+    }
+    setStatus(modelCatalogStatus, modelInventoryLoaded
+        ? `${availableModelFilenames.length} GGUF models available across inference instances.`
+        : 'Shared model catalog is unavailable.', modelInventoryLoaded ? 'ready' : 'error');
+    modelDownloadFilename.disabled = !canEditInference;
+    modelDownloadUrl.disabled = !canEditInference;
+    newInferenceInstanceId.disabled = !canEditInference;
+    newInferenceModel.replaceChildren();
+    for (const filename of availableModelFilenames) {
+        const option = document.createElement('option');
+        option.value = filename;
+        option.textContent = filename;
+        newInferenceModel.append(option);
+    }
+    newInferenceModel.disabled = !canEditInference || !modelInventoryLoaded;
+    updateInferenceCreateState();
+    updateModelDownloadButton();
 }
 
 async function loadInferenceInstances({ quiet = false } = {}) {
     if (!quiet) setStatus(inferenceMessage, 'Loading models...', 'loading');
+    try {
+        const modelsResponse = await fetch('/api/inference-models', {
+            cache: 'no-store', headers: { Accept: 'application/json' },
+        });
+        if (!modelsResponse.ok) throw new Error('unavailable');
+        const modelsRecord = await modelsResponse.json();
+        if (!Array.isArray(modelsRecord.models) || modelsRecord.models.some((name) => typeof name !== 'string')) {
+            throw new Error('unavailable');
+        }
+        availableModelFilenames = modelsRecord.models;
+        modelInventoryLoaded = true;
+    } catch {
+        availableModelFilenames = [];
+        modelInventoryLoaded = false;
+    }
+    renderModelCatalog();
     try {
         const response = await fetch('/api/inference-instances', {
             cache: 'no-store', headers: { Accept: 'application/json' },
@@ -146,54 +347,108 @@ async function loadInferenceInstances({ quiet = false } = {}) {
         if (!response.ok) throw new Error('unavailable');
         const record = await response.json();
         canEditInference = record.can_edit === true && record.preview !== true;
+        activeInferenceInstanceCount = record.instances.length;
+        renderModelCatalog();
+        syncInferenceInstanceForms(record.instances);
         for (const instance of record.instances) {
             const form = document.querySelector(`[data-instance="${instance.config.instance_id}"]`);
             const input = form.elements.model_filename;
             savedInferenceModels[instance.config.instance_id] = instance.config.model_filename;
-            input.value = instance.config.model_filename;
-            form.elements.model_url.value = instance.config.model_url || '';
-            form.elements.model_sha256.value = instance.config.model_sha256 || '';
+            renderModelSelection(form, instance.config.model_filename);
             const rolloutActive = ['pending', 'rolling_out'].includes(instance.config.rollout_status);
-            input.disabled = !canEditInference || rolloutActive;
-            form.elements.model_url.disabled = !canEditInference || rolloutActive;
-            form.elements.model_sha256.disabled = !canEditInference || rolloutActive;
+            input.disabled = !canEditInference || rolloutActive || !modelInventoryLoaded;
             form.querySelector('.audit-line').textContent = instance.version
                 ? `Version ${instance.version} | Updated ${instance.updated_at} by ${instance.updated_by}`
                 : 'Configured default; no saved override.';
-            const status = instance.config.download_status;
-            if (instance.config.download_request_id) {
-                inferenceDownloads[instance.config.instance_id] = {
-                    requestId: instance.config.download_request_id,
-                    status,
-                };
-            }
-            showDownloadStatus(
-                form,
-                instance.config.download_request_id ? status : '',
-                instance.config.download_error,
-            );
             showRolloutStatus(
                 form,
                 instance.config.rollout_status,
                 instance.config.rollout_error,
             );
             updateInferenceSaveState(form);
-            updateModelDownloadButton(form);
+            updateInferenceDeleteState(form);
+            updateModelDownloadButton();
         }
-        if (!quiet) setStatus(inferenceMessage, record.preview
-            ? 'Local preview; live backend data is read-only.'
-            : canEditInference ? 'Organization owner access verified.'
-                : 'Organization owner access is required to save changes.', 'ready');
+        if (!quiet) setStatus(inferenceMessage, !modelInventoryLoaded
+            ? 'Model availability is unavailable; selections are read-only.'
+            : record.preview ? 'Local preview; live backend data is read-only.'
+                : canEditInference ? 'Organization owner access verified.'
+                    : 'Organization owner access is required to save changes.',
+            modelInventoryLoaded ? 'ready' : 'error');
     } catch {
         canEditInference = false;
         document.querySelectorAll('.inference-instance').forEach((form) => {
             form.elements.model_filename.disabled = true;
-            form.elements.model_url.disabled = true;
-            form.elements.model_sha256.disabled = true;
             updateInferenceSaveState(form);
-            updateModelDownloadButton(form);
+            updateInferenceDeleteState(form);
         });
+        modelDownloadFilename.disabled = true;
+        modelDownloadUrl.disabled = true;
+        newInferenceInstanceId.disabled = true;
+        newInferenceModel.disabled = true;
+        createInferenceInstanceButton.disabled = true;
+        updateModelDownloadButton();
         setStatus(inferenceMessage, 'Inference configuration is unavailable.', 'error');
+    }
+}
+
+async function createInferenceInstance(event) {
+    event.preventDefault();
+    if (!inferenceInstanceCreateForm.reportValidity()) return;
+    createInferenceInstanceButton.disabled = true;
+    setStatus(inferenceMessage, 'Creating inference configuration...', 'loading');
+    try {
+        const response = await fetch('/api/inference-instances', {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                instance_id: newInferenceInstanceId.value,
+                model_filename: newInferenceModel.value,
+            }),
+        });
+        if (response.status === 409) throw new Error('conflict');
+        if (!response.ok) throw new Error('unavailable');
+        const record = await response.json();
+        setStatus(inferenceMessage, `${record.config.instance_id} configuration created.`, 'success');
+        showToast(`${record.config.instance_id} configuration created.`, 'success');
+        newInferenceInstanceId.value = '';
+        await loadInferenceInstances({ quiet: true });
+        await loadInferenceMetrics();
+    } catch (error) {
+        const duplicate = error.message === 'conflict';
+        setStatus(inferenceMessage, duplicate
+            ? 'That inference instance ID already exists.'
+            : 'Inference configuration could not be created.', 'error');
+        showToast(duplicate
+            ? 'That inference instance ID already exists.'
+            : 'Inference configuration could not be created.', 'error');
+    }
+    updateInferenceCreateState();
+}
+
+async function deleteInferenceInstance(instanceId) {
+    if (!window.confirm(`Delete the saved configuration for ${instanceId}? Historical references will remain.`)) return;
+    setStatus(inferenceMessage, `Deleting ${instanceId} configuration...`, 'loading');
+    try {
+        const response = await fetch(`/api/inference-instances/${instanceId}`, {
+            method: 'DELETE',
+            headers: { Accept: 'application/json' },
+        });
+        if (response.status === 409) throw new Error('conflict');
+        if (!response.ok) throw new Error('unavailable');
+        delete savedInferenceModels[instanceId];
+        setStatus(inferenceMessage, `${instanceId} configuration deleted.`, 'success');
+        showToast(`${instanceId} configuration deleted.`, 'success');
+        await loadInferenceInstances({ quiet: true });
+        await loadInferenceMetrics();
+    } catch (error) {
+        const conflict = error.message === 'conflict';
+        setStatus(inferenceMessage, conflict
+            ? 'This configuration cannot be deleted while active or when it is the last one.'
+            : 'Inference configuration could not be deleted.', 'error');
+        showToast(conflict
+            ? 'This configuration cannot be deleted while active or when it is the last one.'
+            : 'Inference configuration could not be deleted.', 'error');
     }
 }
 
@@ -205,7 +460,7 @@ async function saveInferenceInstance(event) {
     const input = form.elements.model_filename;
     const button = form.querySelector('button[type="submit"]');
     button.disabled = true;
-    setStatus(inferenceMessage, `Saving ${instance.toUpperCase()} model selection...`, 'loading');
+    setStatus(inferenceMessage, `Applying ${instance.toUpperCase()} model...`, 'loading');
     try {
         const response = await fetch(`/api/inference-instances/${instance}`, {
             method: 'PUT',
@@ -217,65 +472,81 @@ async function saveInferenceInstance(event) {
         savedInferenceModels[instance] = record.config.model_filename;
         form.querySelector('.audit-line').textContent = `Version ${record.version} | Updated ${record.updated_at} by ${record.updated_by}`;
         showRolloutStatus(form, record.config.rollout_status, record.config.rollout_error);
-        setStatus(inferenceMessage, `${instance.toUpperCase()} selection saved.`, 'success');
+        setStatus(inferenceMessage, `${instance.toUpperCase()} model rollout requested.`, 'success');
+        showToast(`${instance.toUpperCase()} model rollout requested.`, 'success');
     } catch {
-        setStatus(inferenceMessage, `${instance.toUpperCase()} selection could not be saved.`, 'error');
+        setStatus(inferenceMessage, `${instance.toUpperCase()} model could not be applied.`, 'error');
+        showToast(`${instance.toUpperCase()} model could not be applied.`, 'error');
     }
     updateInferenceSaveState(form);
 }
 
 async function requestInferenceModelDownload(event) {
-    const form = event.currentTarget.closest('.inference-instance');
-    const instance = form.dataset.instance;
-    if (!form.elements.model_url.reportValidity() || !form.elements.model_sha256.reportValidity()) return;
-    const button = form.querySelector('.download-model');
+    event.preventDefault();
+    if (!modelDownloadForm.reportValidity()) return;
+    const button = modelDownloadForm.querySelector('.download-model');
     button.disabled = true;
-    inferenceDownloads[instance] = { requestId: null, status: 'queued' };
-    updateInferenceSaveState(form);
-    showDownloadStatus(form, 'queued');
+    sharedDownload = { requestId: null, status: 'resolving', publicError: null };
+    showDownloadStatus('resolving');
     try {
-        const response = await fetch(`/api/inference-instances/${instance}/model-downloads`, {
+        const response = await fetch('/api/inference-model-downloads', {
             method: 'POST',
             headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model_filename: form.elements.model_filename.value,
-                model_url: form.elements.model_url.value,
-                model_sha256: form.elements.model_sha256.value,
+                model_filename: modelDownloadFilename.value,
+                model_url: modelDownloadUrl.value,
             }),
         });
-        if (response.status === 409) throw new Error('An inference model download or rollout is already active.');
+        if (response.status === 409) throw new Error('A shared model download is already active.');
+        if (response.status === 422) throw new Error('Hugging Face file could not be verified. Check the URL and try again.');
         if (!response.ok) throw new Error('Model download request was rejected.');
         const record = await response.json();
-        savedInferenceModels[instance] = record.model_filename;
-        inferenceDownloads[instance] = { requestId: record.request_id, status: record.status };
-        updateInferenceSaveState(form);
-        showDownloadStatus(form, record.status, record.public_error);
+        sharedDownload = {
+            requestId: record.request_id,
+            status: record.status,
+            publicError: record.public_error,
+        };
+        showDownloadStatus(record.status, record.public_error);
+        showToast('Model download added to the shared queue.', 'success');
         await loadInferenceInstances({ quiet: true });
         await pollInferenceDownloads();
     } catch (error) {
-        inferenceDownloads[instance] = { requestId: null, status: 'failed' };
-        updateInferenceSaveState(form);
-        showDownloadStatus(form, 'failed', error.message || 'Model download request failed.');
+        sharedDownload = {
+            requestId: null,
+            status: 'resolution_failed',
+            publicError: error.message || 'Model download request failed.',
+        };
+        showDownloadStatus('failed', sharedDownload.publicError);
+        showToast(sharedDownload.publicError, 'error');
     }
 }
 
 async function pollInferenceDownloads() {
     let downloadBecameTerminal = false;
-    for (const [instance, download] of Object.entries(inferenceDownloads)) {
-        if (!download.requestId || !['queued', 'downloading', 'verifying'].includes(download.status)) continue;
+    const download = sharedDownload;
+    if (download.requestId && ['queued', 'downloading', 'verifying'].includes(download.status)) {
         try {
             const response = await fetch(`/api/inference-model-downloads/${download.requestId}`, {
                 cache: 'no-store', headers: { Accept: 'application/json' },
             });
             if (!response.ok) throw new Error('unavailable');
             const record = await response.json();
-            inferenceDownloads[instance] = { requestId: record.request_id, status: record.status };
-            downloadBecameTerminal ||= !['queued', 'downloading', 'verifying'].includes(record.status);
-            const form = document.querySelector(`[data-instance="${instance}"]`);
-            showDownloadStatus(form, record.status, record.public_error);
+            sharedDownload = {
+                requestId: record.request_id,
+                status: record.status,
+                publicError: record.public_error,
+            };
+            const terminal = !['queued', 'downloading', 'verifying'].includes(record.status);
+            downloadBecameTerminal ||= terminal;
+            if (terminal) {
+                showToast(record.status === 'ready'
+                    ? 'Model download completed and is available in shared storage.'
+                    : record.public_error || `Model download ${record.status}.`,
+                    record.status === 'ready' ? 'success' : 'error');
+            }
+            showDownloadStatus(record.status, record.public_error);
         } catch {
-            const form = document.querySelector(`[data-instance="${instance}"]`);
-            showDownloadStatus(form, 'unavailable', 'Model download status is unavailable.');
+            showDownloadStatus(download.status, 'Model download status is unavailable.');
         }
     }
     const rolloutActive = [...document.querySelectorAll('.inference-instance')].some((form) =>
@@ -302,15 +573,25 @@ function metricCell(row, value) {
 
 function renderInferenceMetrics(instances) {
     inferenceMetricsBody.replaceChildren();
+    if (!instances.length) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.textContent = 'Metrics unavailable.';
+        row.append(cell);
+        inferenceMetricsBody.append(row);
+        return;
+    }
     for (const instance of instances) {
         const row = document.createElement('tr');
         metricCell(row, instance.instance_id.toUpperCase());
-        metricCell(row, formatMetric(instance.cpu_utilization_percent, (value) => `${value.toFixed(1)}%`));
-        metricCell(row, formatMetric(instance.ram_used_bytes, formatBytes));
-        metricCell(row, formatMetric(instance.gpu_utilization_percent, (value) => `${value.toFixed(1)}%`));
+        const cpu = formatMetric(instance.cpu_utilization_percent, (value) => `${value.toFixed(1)}%`);
+        const gpu = formatMetric(instance.gpu_utilization_percent, (value) => `${value.toFixed(1)}%`);
+        metricCell(row, `CPU: ${cpu} | GPU: ${gpu}`);
+        const ram = formatMetric(instance.ram_used_bytes, formatBytes);
         const used = formatMetric(instance.vram_used_bytes, formatBytes);
         const total = formatMetric(instance.vram_total_bytes, formatBytes);
-        metricCell(row, used === 'Unavailable' || total === 'Unavailable' ? 'Unavailable' : `${used} / ${total}`);
+        metricCell(row, `RAM: ${ram} | VRAM used: ${used}; total: ${total}`);
         metricCell(row, instance.sampled_at ? new Date(instance.sampled_at).toLocaleString() : 'Unavailable');
         inferenceMetricsBody.append(row);
     }
@@ -326,15 +607,7 @@ async function loadInferenceMetrics() {
         renderInferenceMetrics(record.instances);
         setStatus(inferenceMetricsMessage, 'Metrics refreshed.', 'ready');
     } catch {
-        renderInferenceMetrics(['gpu', 'cpu'].map((instance_id) => ({
-            instance_id,
-            cpu_utilization_percent: { value: null, status: 'unavailable' },
-            ram_used_bytes: { value: null, status: 'unavailable' },
-            gpu_utilization_percent: { value: null, status: 'unavailable' },
-            vram_used_bytes: { value: null, status: 'unavailable' },
-            vram_total_bytes: { value: null, status: 'unavailable' },
-            sampled_at: null,
-        })));
+        renderInferenceMetrics([]);
         setStatus(inferenceMetricsMessage, 'Inference metrics are unavailable.', 'error');
     }
 }
@@ -652,11 +925,13 @@ async function saveAgentRoster(event) {
         });
         if (response.status === 409) {
             setStatus(rosterMessage, 'The roster changed since it was loaded. Reload this page before editing.', 'error');
+            showToast('The roster changed. Reload this page before editing.', 'error');
             updateRosterSaveState();
             return;
         }
         if (response.status === 422) {
             setStatus(rosterMessage, 'Roster validation failed. Check profile fields, skill IDs, and role assignments.', 'error');
+            showToast('Roster validation failed. Check profile fields and assignments.', 'error');
             updateRosterSaveState();
             return;
         }
@@ -664,8 +939,10 @@ async function saveAgentRoster(event) {
         const record = await response.json();
         applyRosterRecord(record);
         setStatus(rosterMessage, `Roster saved as revision ${record.revision}.`, 'success');
+        showToast(`Roster saved as revision ${record.revision}.`, 'success');
     } catch {
         setStatus(rosterMessage, 'Roster could not be saved; the workflow service may be unavailable.', 'error');
+        showToast('Agent roster could not be saved.', 'error');
         updateRosterSaveState();
     }
 }
@@ -675,14 +952,15 @@ timeoutInput.addEventListener('input', () => {
     if (Number(timeoutInput.value) !== savedTimeout) setStatus(configMessage, 'Unsaved changes.', 'dirty');
 });
 document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfig);
-document.querySelectorAll('.inference-instance').forEach((form) => {
-    form.addEventListener('submit', saveInferenceInstance);
-    form.elements.model_filename.addEventListener('input', () => updateInferenceSaveState(form));
-    form.elements.model_filename.addEventListener('input', () => updateModelDownloadButton(form));
-    form.elements.model_url.addEventListener('input', () => updateModelDownloadButton(form));
-    form.elements.model_sha256.addEventListener('input', () => updateModelDownloadButton(form));
-    form.querySelector('.download-model').addEventListener('click', requestInferenceModelDownload);
+inferenceInstanceCreateForm.addEventListener('submit', createInferenceInstance);
+newInferenceInstanceId.addEventListener('input', updateInferenceCreateState);
+newInferenceModel.addEventListener('change', updateInferenceCreateState);
+modelDownloadForm.addEventListener('submit', requestInferenceModelDownload);
+modelDownloadFilename.addEventListener('input', () => {
+    modelDownloadFilenameManuallyEdited = true;
+    updateModelDownloadButton();
 });
+modelDownloadUrl.addEventListener('input', suggestModelFilenameFromUrl);
 rosterForm.addEventListener('submit', saveAgentRoster);
 addProfileButton.addEventListener('click', addProfile);
 loadAgentConfig();

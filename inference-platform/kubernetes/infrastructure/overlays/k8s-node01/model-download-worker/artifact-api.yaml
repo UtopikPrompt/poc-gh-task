@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-model-artifact-api
+  labels:
+    app.kubernetes.io/name: inference-model-artifact-api
+    app.kubernetes.io/part-of: inference-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inference-model-artifact-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inference-model-artifact-api
+        app.kubernetes.io/part-of: inference-platform
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        supplementalGroups:
+        - 20000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: artifact-api
+        image: ghcr.io/utopikprompt/poc-gh-task-langgraph-service:dev
+        imagePullPolicy: Always
+        command: [ "uvicorn" ]
+        args:
+        - langgraph_service.model_artifact_api:create_app
+        - --factory
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8000"
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        env:
+        - name: MODEL_DIRECTORY
+          value: /storage
+        - name: MODEL_ARTIFACT_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: inference-model-reconciler-credentials
+              key: MODEL_RECONCILER_TOKEN
+        volumeMounts:
+        - name: model-artifacts
+          mountPath: /storage
+          readOnly: true
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 18
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 30
+          timeoutSeconds: 2
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ "ALL" ]
+      volumes:
+      - name: model-artifacts
+        persistentVolumeClaim:
+          claimName: inference-model-artifacts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-model-artifact-api
+  labels:
+    app.kubernetes.io/name: inference-model-artifact-api
+    app.kubernetes.io/part-of: inference-platform
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: inference-model-artifact-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP

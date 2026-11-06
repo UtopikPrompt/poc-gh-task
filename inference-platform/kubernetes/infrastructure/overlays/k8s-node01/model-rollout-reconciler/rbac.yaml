@@ -17,15 +17,9 @@ metadata:
 rules:
 - apiGroups: [ "apps" ]
   resources: [ "deployments" ]
-  resourceNames:
-  - llama-cpp-server
-  - llama-cpp-server-cpu
   verbs: [ "get", "patch" ]
 - apiGroups: [ "apps" ]
   resources: [ "deployments/status" ]
-  resourceNames:
-  - llama-cpp-server
-  - llama-cpp-server-cpu
   verbs: [ "get" ]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

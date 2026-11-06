@@ -197,14 +197,12 @@ def test_inference_download_and_metrics_contracts_are_registered_and_safe():
         (CONTRACTS_ROOT / "openapi" / "management-portal.json").read_text()
     )
     internal_download = langgraph_contract["paths"][
-        "/internal/management/inference-instances/{instance_id}/model-downloads"
+        "/internal/management/inference-model-downloads"
     ]["post"]
     internal_status = langgraph_contract["paths"][
         "/internal/management/inference-model-downloads/{request_id}"
     ]["get"]
-    portal_download = portal_contract["paths"][
-        "/api/inference-instances/{instance_id}/model-downloads"
-    ]["post"]
+    portal_download = portal_contract["paths"]["/api/inference-model-downloads"]["post"]
     portal_status = portal_contract["paths"][
         "/api/inference-model-downloads/{request_id}"
     ]["get"]
@@ -215,6 +213,40 @@ def test_inference_download_and_metrics_contracts_are_registered_and_safe():
     assert portal_status["security"] == [{"portalSession": []}]
     assert "403" in portal_download["responses"]
     assert "403" in portal_status["responses"]
+    assert (
+        "/internal/management/inference-instances/{instance_id}/model-downloads"
+        not in langgraph_contract["paths"]
+    )
+    assert (
+        "/api/inference-instances/{instance_id}/model-downloads"
+        not in portal_contract["paths"]
+    )
+    assert (
+        "instance_id"
+        not in langgraph_contract["components"]["schemas"]["ModelDownloadRecord"][
+            "properties"
+        ]
+    )
+    assert (
+        "instance_id"
+        not in portal_contract["components"]["schemas"]["PortalModelDownloadRecord"][
+            "properties"
+        ]
+    )
+    for contract, schema_name in (
+        (langgraph_contract, "InferenceInstanceRecord"),
+        (portal_contract, "InferenceInstanceRecord"),
+    ):
+        instance_properties = contract["components"]["schemas"][schema_name][
+            "properties"
+        ]["config"]["properties"]
+        assert not {
+            "model_url",
+            "model_sha256",
+            "download_status",
+            "download_request_id",
+            "download_error",
+        }.intersection(instance_properties)
     assert (
         "model_url"
         not in langgraph_contract["components"]["schemas"]["ModelDownloadRecord"][
@@ -239,6 +271,32 @@ def test_inference_download_and_metrics_contracts_are_registered_and_safe():
         Draft202012Validator.check_schema(
             langgraph_contract["components"]["schemas"][schema_name]
         )
+
+
+def test_inference_instance_lifecycle_contracts_are_on_instance_paths():
+    langgraph_contract = json.loads(
+        (CONTRACTS_ROOT / "openapi" / "langgraph-service.json").read_text()
+    )
+    portal_contract = json.loads(
+        (CONTRACTS_ROOT / "openapi" / "management-portal.json").read_text()
+    )
+
+    internal_collection = langgraph_contract["paths"][
+        "/internal/management/inference-instances"
+    ]
+    internal_item = langgraph_contract["paths"][
+        "/internal/management/inference-instances/{instance_id}"
+    ]
+    portal_collection = portal_contract["paths"]["/api/inference-instances"]
+    portal_item = portal_contract["paths"]["/api/inference-instances/{instance_id}"]
+
+    assert internal_collection["post"]["security"] == [{"bearerAuth": []}]
+    assert internal_collection["post"]["responses"]["201"]
+    assert internal_item["delete"]["security"] == [{"bearerAuth": []}]
+    assert portal_collection["post"]["security"] == [{"portalSession": []}]
+    assert portal_item["delete"]["security"] == [{"portalSession": []}]
+    assert set(portal_contract["paths"]["/api/inference-models"]) == {"get"}
+    assert "Deployment" in internal_collection["post"]["description"]
 
 
 def _references(value):

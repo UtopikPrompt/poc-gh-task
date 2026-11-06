@@ -11,18 +11,19 @@ from typing import Callable
 from uuid import UUID
 
 import httpx
+from pydantic import TypeAdapter
 
+from langgraph_service.inference_config import InferenceInstance
 from langgraph_service.model_download import validate_model_filename
 
 NAMESPACE = "inference"
-DEPLOYMENTS = {
-    "gpu": "llama-cpp-server",
-    "cpu": "llama-cpp-server-cpu",
-}
 CONTAINER_NAME = "llama-server"
 MODEL_PATH_PREFIX = "/models/"
 SERVICE_ACCOUNT_DIRECTORY = Path("/var/run/secrets/kubernetes.io/serviceaccount")
-IDEMPOTENCY_KEY = re.compile(r"(?:gpu|cpu):[1-9][0-9]*:[0-9a-f-]{36}\Z")
+IDEMPOTENCY_KEY = re.compile(
+    r"(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?:[1-9][0-9]*:[0-9a-f-]{36}\Z"
+)
+INFERENCE_INSTANCE_ADAPTER = TypeAdapter(InferenceInstance)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -54,16 +55,15 @@ def _event_values(event: object) -> tuple[str, str, str, str, int, str]:
     try:
         event_id = str(UUID(str(event["event_id"])))
         lease_token = str(UUID(str(event["lease_token"])))
-        request_id = str(UUID(str(event["download_request_id"])))
-        instance_id = event["instance_id"]
+        request_id = str(UUID(str(event["rollout_request_id"])))
+        instance_id = INFERENCE_INSTANCE_ADAPTER.validate_python(event["instance_id"])
         config_version = event["config_version"]
         model_filename = validate_model_filename(event["model_filename"])
         idempotency_key = event["idempotency_key"]
     except (KeyError, TypeError, ValueError) as error:
         raise ReconcileError("invalid rollout event") from error
     if (
-        instance_id not in DEPLOYMENTS
-        or isinstance(config_version, bool)
+        isinstance(config_version, bool)
         or not isinstance(config_version, int)
         or config_version < 1
     ):
@@ -167,7 +167,13 @@ class ModelRolloutReconciler:
             return None
 
     def _deployment_url(self, instance_id: str) -> str:
-        deployment = DEPLOYMENTS[instance_id]
+        deployment = (
+            "llama-cpp-server"
+            if instance_id == "gpu"
+            else "llama-cpp-server-cpu"
+            if instance_id == "cpu"
+            else f"llama-cpp-server-{instance_id}"
+        )
         return f"/apis/apps/v1/namespaces/{NAMESPACE}/deployments/{deployment}"
 
     def _get_deployment(self, instance_id: str) -> dict[str, object]:

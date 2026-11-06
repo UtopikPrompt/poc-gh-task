@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import math
 import time
-from typing import Callable, Literal
+from typing import Callable, Literal, Sequence
 
 import httpx
+
+from langgraph_service.inference_config import InferenceInstance
 
 MetricStatus = Literal["available", "stale", "unavailable"]
 
@@ -32,14 +34,12 @@ class PrometheusInferenceMetrics:
         self._stale_after = stale_after_seconds
         self._timeout = timeout_seconds
 
-    def get_metrics(self) -> dict[str, object]:
+    def get_metrics(
+        self, instance_ids: Sequence[InferenceInstance]
+    ) -> dict[str, object]:
         instances = []
-        for instance_id in ("gpu", "cpu"):
-            pod = (
-                "llama-cpp-server-[a-z0-9]{9,10}-[a-z0-9]{5}"
-                if instance_id == "gpu"
-                else "llama-cpp-server-cpu-.+"
-            )
+        for instance_id in instance_ids:
+            pod = "llama-cpp-server-.+"
             selector = (
                 f'namespace="inference",inference_instance="{instance_id}",'
                 f'pod=~"{pod}",container="llama-server"'
@@ -56,7 +56,7 @@ class PrometheusInferenceMetrics:
                     "sum(container_memory_working_set_bytes{" + selector + "})"
                 ),
             }
-            if instance_id == "gpu":
+            if instance_id.startswith("gpu"):
                 gpu_selector = (
                     f'namespace="inference",inference_instance="{instance_id}",'
                     f'pod=~"{pod}"'

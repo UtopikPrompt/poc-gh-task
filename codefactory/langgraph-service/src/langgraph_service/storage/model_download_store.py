@@ -9,9 +9,10 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import psycopg
+from psycopg.errors import UniqueViolation
 from psycopg.rows import dict_row
 
-from langgraph_service.inference_config import InferenceInstance, DownloadStatus
+from langgraph_service.inference_config import DownloadStatus, InferenceInstance
 from langgraph_service.model_download import (
     validate_download_url,
     validate_model_filename,
@@ -27,7 +28,6 @@ PUBLIC_FAILURES: dict[FailureCode, str] = {
     "policy_rejected": "Model download was rejected by URL or network safety policy.",
     "download_failed": "Model download failed; verify artifact availability and retry.",
 }
-_ACTIVE_STATUSES = frozenset({"queued", "downloading", "verifying"})
 _TRANSITIONS = {
     "queued": frozenset({"downloading", "failed"}),
     "downloading": frozenset({"downloading", "verifying", "failed"}),
@@ -51,7 +51,6 @@ def validate_download_transition(
 @dataclass(frozen=True)
 class ModelDownloadRequest:
     request_id: UUID
-    instance_id: InferenceInstance
     model_filename: str
     model_url: str
     model_sha256: str
@@ -72,7 +71,7 @@ class ClaimedModelDownload(ModelDownloadRequest):
 class ClaimedModelRollout:
     event_id: UUID
     instance_id: InferenceInstance
-    download_request_id: UUID
+    rollout_request_id: UUID
     model_filename: str
     config_version: int
     idempotency_key: str
@@ -89,7 +88,6 @@ class PostgresModelDownloadStore:
     def submit(
         self,
         *,
-        instance_id: InferenceInstance,
         model_filename: str,
         model_url: str,
         model_sha256: str,
@@ -103,61 +101,33 @@ class PostgresModelDownloadStore:
         ):
             raise ValueError("requested_by must be a GitHub login")
         request_id = uuid4()
-        with (
-            self._connection_factory(
-                self._database_url, row_factory=dict_row
-            ) as connection,
-            connection.cursor() as cursor,
-        ):
-            cursor.execute(
-                "SELECT download_status, rollout_status, version "
-                "FROM langgraph_service.inference_instance_config "
-                "WHERE instance_id = %s FOR UPDATE",
-                (instance_id,),
-            )
-            config = cursor.fetchone()
-            if config is None:
-                raise ValueError("unknown inference instance")
-            if config["download_status"] in _ACTIVE_STATUSES:
-                raise ValueError("an inference model download is already active")
-            if config["rollout_status"] in {"pending", "rolling_out"}:
-                raise ValueError("an inference model rollout is active")
-            cursor.execute(
-                "INSERT INTO langgraph_service.inference_model_download_request "
-                "(request_id, instance_id, model_filename, model_url, model_sha256, "
-                "requested_by, config_version) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                "RETURNING request_id, instance_id, model_filename, model_url, model_sha256, "
-                "requested_by, status, public_error, attempts, created_at, updated_at",
-                (
-                    request_id,
-                    instance_id,
-                    filename,
-                    url,
-                    digest,
-                    requested_by,
-                    config["version"] + 1,
-                ),
-            )
-            row = cursor.fetchone()
-            cursor.execute(
-                "UPDATE langgraph_service.inference_instance_config "
-                "SET model_filename = %s, model_url = %s, model_sha256 = %s, "
-                "download_status = 'queued', current_request_id = %s, download_error = NULL, "
-                "rollout_status = 'waiting_for_download', rollout_request_id = NULL, "
-                "rollout_error = NULL, "
-                "version = version + 1, updated_at = now(), updated_by = %s "
-                "WHERE instance_id = %s AND version = %s",
-                (
-                    filename,
-                    url,
-                    digest,
-                    request_id,
-                    requested_by,
-                    instance_id,
-                    config["version"],
-                ),
-            )
+        try:
+            with (
+                self._connection_factory(
+                    self._database_url, row_factory=dict_row
+                ) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    "SELECT request_id "
+                    "FROM langgraph_service.inference_model_download_request "
+                    "WHERE status IN ('queued', 'downloading', 'verifying') "
+                    "FOR UPDATE"
+                )
+                if cursor.fetchone() is not None:
+                    raise ValueError("a shared model download is already active")
+                cursor.execute(
+                    "INSERT INTO langgraph_service.inference_model_download_request "
+                    "(request_id, instance_id, model_filename, model_url, model_sha256, "
+                    "requested_by, config_version) "
+                    "VALUES (%s, NULL, %s, %s, %s, %s, 0) "
+                    "RETURNING request_id, model_filename, model_url, model_sha256, "
+                    "requested_by, status, public_error, attempts, created_at, updated_at",
+                    (request_id, filename, url, digest, requested_by),
+                )
+                row = cursor.fetchone()
+        except UniqueViolation as error:
+            raise ValueError("a shared model download is already active") from error
         return self._request(row)
 
     def get(self, request_id: UUID) -> ModelDownloadRequest | None:
@@ -168,7 +138,7 @@ class PostgresModelDownloadStore:
             connection.cursor() as cursor,
         ):
             cursor.execute(
-                "SELECT request_id, instance_id, model_filename, model_url, model_sha256, "
+                "SELECT request_id, model_filename, model_url, model_sha256, "
                 "requested_by, status, public_error, attempts, created_at, updated_at "
                 "FROM langgraph_service.inference_model_download_request "
                 "WHERE request_id = %s",
@@ -198,20 +168,13 @@ class PostgresModelDownloadStore:
                 " lease_token = %s, lease_until = now() + (%s * interval '1 second'),"
                 " public_error = NULL, updated_at = now()"
                 " FROM candidate WHERE request.request_id = candidate.request_id"
-                " RETURNING request.request_id, request.instance_id, request.model_filename,"
+                " RETURNING request.request_id, request.model_filename,"
                 " request.model_url, request.model_sha256, request.requested_by, request.status,"
                 " request.public_error, request.attempts, request.created_at, request.updated_at,"
-                " request.lease_token, request.instance_id",
+                " request.lease_token",
                 (lease_token, lease_seconds),
             )
             row = cursor.fetchone()
-            if row is not None:
-                cursor.execute(
-                    "UPDATE langgraph_service.inference_instance_config "
-                    "SET download_status = 'downloading', download_error = NULL "
-                    "WHERE instance_id = %s AND current_request_id = %s",
-                    (row["instance_id"], row["request_id"]),
-                )
         if row is None:
             return None
         return ClaimedModelDownload(
@@ -244,11 +207,9 @@ class PostgresModelDownloadStore:
             expected="downloading",
             target="verifying",
             public_error=None,
-            update_config_status="verifying",
         )
 
     def complete(self, request_id: UUID, lease_token: UUID) -> None:
-        event_id = uuid4()
         with (
             self._connection_factory(
                 self._database_url, row_factory=dict_row
@@ -261,42 +222,12 @@ class PostgresModelDownloadStore:
                 "lease_until = NULL, updated_at = now() "
                 "WHERE request_id = %s AND lease_token = %s AND lease_until > now() "
                 "AND status = 'verifying' "
-                "RETURNING instance_id, model_filename, config_version",
+                "RETURNING request_id",
                 (request_id, lease_token),
             )
             request = cursor.fetchone()
             if request is None:
                 raise ValueError("download lease is no longer active")
-            cursor.execute(
-                "UPDATE langgraph_service.inference_instance_config "
-                "SET download_status = 'ready', download_error = NULL, "
-                "rollout_status = 'pending', rollout_request_id = %s, rollout_error = NULL "
-                "WHERE instance_id = %s AND current_request_id = %s "
-                "AND version = %s AND model_filename = %s "
-                "RETURNING instance_id",
-                (
-                    request_id,
-                    request["instance_id"],
-                    request_id,
-                    request["config_version"],
-                    request["model_filename"],
-                ),
-            )
-            current = cursor.fetchone()
-            if current is not None:
-                cursor.execute(
-                    "INSERT INTO langgraph_service.inference_model_rollout_outbox "
-                    "(event_id, download_request_id, instance_id, model_filename, "
-                    "config_version, idempotency_key) VALUES (%s, %s, %s, %s, %s, %s)",
-                    (
-                        event_id,
-                        request_id,
-                        request["instance_id"],
-                        request["model_filename"],
-                        request["config_version"],
-                        f"{request['instance_id']}:{request['config_version']}:{request_id}",
-                    ),
-                )
 
     def claim_rollout(self, *, lease_seconds: int = 120) -> ClaimedModelRollout | None:
         if not 30 <= lease_seconds <= 900:
@@ -315,21 +246,19 @@ class PostgresModelDownloadStore:
                 "WHERE event.status IN ('pending', 'leased') AND NOT EXISTS ("
                 "SELECT 1 FROM langgraph_service.inference_instance_config AS config "
                 "WHERE config.instance_id = event.instance_id "
-                "AND config.current_request_id = event.download_request_id "
+                "AND config.rollout_request_id = event.rollout_request_id "
                 "AND config.model_filename = event.model_filename "
-                "AND config.version = event.config_version "
-                "AND config.download_status = 'ready')"
+                "AND config.version = event.config_version)"
             )
             cursor.execute(
-                "SELECT event.event_id, event.instance_id, event.download_request_id, "
+                "SELECT event.event_id, event.instance_id, event.rollout_request_id, "
                 "event.model_filename, event.config_version, event.idempotency_key "
                 "FROM langgraph_service.inference_model_rollout_outbox AS event "
                 "JOIN langgraph_service.inference_instance_config AS config "
                 "ON config.instance_id = event.instance_id "
-                "AND config.current_request_id = event.download_request_id "
+                "AND config.rollout_request_id = event.rollout_request_id "
                 "AND config.model_filename = event.model_filename "
                 "AND config.version = event.config_version "
-                "AND config.download_status = 'ready' "
                 "AND config.rollout_status IN ('pending', 'rolling_out') "
                 "WHERE event.status = 'pending' OR (event.status = 'leased' "
                 "AND event.lease_until < now()) "
@@ -345,7 +274,7 @@ class PostgresModelDownloadStore:
                 "lease_until = now() + (%s * interval '1 second'), "
                 "attempts = attempts + 1, updated_at = now() "
                 "WHERE event_id = %s "
-                "RETURNING event_id, instance_id, download_request_id, model_filename, "
+                "RETURNING event_id, instance_id, rollout_request_id, model_filename, "
                 "config_version, idempotency_key, lease_token, lease_until, attempts",
                 (lease_token, lease_seconds, candidate["event_id"]),
             )
@@ -353,14 +282,13 @@ class PostgresModelDownloadStore:
             cursor.execute(
                 "UPDATE langgraph_service.inference_instance_config "
                 "SET rollout_status = 'rolling_out' "
-                "WHERE instance_id = %s AND current_request_id = %s "
+                "WHERE instance_id = %s AND rollout_request_id = %s "
                 "AND version = %s AND model_filename = %s "
-                "AND download_status = 'ready' "
                 "AND rollout_status IN ('pending', 'rolling_out') "
                 "RETURNING instance_id",
                 (
                     row["instance_id"],
-                    row["download_request_id"],
+                    row["rollout_request_id"],
                     row["config_version"],
                     row["model_filename"],
                 ),
@@ -391,7 +319,7 @@ class PostgresModelDownloadStore:
             connection.cursor() as cursor,
         ):
             cursor.execute(
-                "SELECT event_id, download_request_id, instance_id, model_filename, "
+                "SELECT event_id, rollout_request_id, instance_id, model_filename, "
                 "config_version, status, lease_token, lease_until, "
                 "(lease_until > now()) AS lease_active "
                 "FROM langgraph_service.inference_model_rollout_outbox "
@@ -411,13 +339,13 @@ class PostgresModelDownloadStore:
                 raise ValueError("rollout acknowledgment is no longer active")
             cursor.execute(
                 "SELECT instance_id FROM langgraph_service.inference_instance_config "
-                "WHERE instance_id = %s AND current_request_id = %s "
+                "WHERE instance_id = %s AND rollout_request_id = %s "
                 "AND model_filename = %s AND version = %s "
-                "AND download_status = 'ready' AND rollout_status = 'rolling_out' "
+                "AND rollout_status = 'rolling_out' "
                 "FOR UPDATE",
                 (
                     event["instance_id"],
-                    event["download_request_id"],
+                    event["rollout_request_id"],
                     event["model_filename"],
                     event["config_version"],
                 ),
@@ -433,13 +361,13 @@ class PostgresModelDownloadStore:
             cursor.execute(
                 "UPDATE langgraph_service.inference_instance_config "
                 "SET rollout_status = %s, rollout_error = %s "
-                "WHERE instance_id = %s AND current_request_id = %s "
+                "WHERE instance_id = %s AND rollout_request_id = %s "
                 "AND version = %s AND rollout_status = 'rolling_out'",
                 (
                     "ready" if outcome == "succeeded" else "failed",
                     None if outcome == "succeeded" else ROLLOUT_FAILURE,
                     event["instance_id"],
-                    event["download_request_id"],
+                    event["rollout_request_id"],
                     event["config_version"],
                 ),
             )
@@ -458,7 +386,6 @@ class PostgresModelDownloadStore:
             expected=None,
             target="failed",
             public_error=PUBLIC_FAILURES[code],
-            update_config_status="failed",
         )
 
     def _transition_request(
@@ -469,7 +396,6 @@ class PostgresModelDownloadStore:
         expected: DownloadStatus | None,
         target: DownloadStatus,
         public_error: str | None,
-        update_config_status: str,
     ) -> None:
         if expected is not None:
             validate_download_transition(expected, target)
@@ -507,30 +433,16 @@ class PostgresModelDownloadStore:
                 f"{lease_sql}updated_at = now() "
                 f"WHERE request_id = %s AND lease_token = %s AND lease_until > now() "
                 f"AND {expected_sql} "
-                "RETURNING instance_id",
+                "RETURNING request_id",
                 parameters,
             )
-            row = cursor.fetchone()
-            if row is None:
+            if cursor.fetchone() is None:
                 raise ValueError("download lease is no longer active")
-            cursor.execute(
-                "UPDATE langgraph_service.inference_instance_config "
-                "SET download_status = %s, download_error = %s "
-                + (
-                    ", rollout_status = 'not_requested', rollout_request_id = NULL, "
-                    "rollout_error = NULL "
-                    if target == "failed"
-                    else ""
-                )
-                + "WHERE instance_id = %s AND current_request_id = %s",
-                (update_config_status, public_error, row["instance_id"], request_id),
-            )
 
     @staticmethod
     def _request_values(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "request_id": row["request_id"],
-            "instance_id": row["instance_id"],
             "model_filename": row["model_filename"],
             "model_url": row["model_url"],
             "model_sha256": row["model_sha256"],

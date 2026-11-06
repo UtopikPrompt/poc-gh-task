@@ -1,6 +1,7 @@
 import hashlib
 from pathlib import Path
 
+import httpx
 import pytest
 
 from langgraph_service.model_download import (
@@ -8,10 +9,137 @@ from langgraph_service.model_download import (
     ModelDownloadError,
     _public_addresses,
     download_model_artifact,
+    resolve_huggingface_model_file,
     validate_download_url,
     validate_model_filename,
     validate_sha256,
 )
+
+
+def test_resolves_exact_file_lfs_oid_for_show_file_info_url():
+    revision = "b" * 40
+    digest = "a" * 64
+    seen = []
+
+    def metadata_response(request):
+        seen.append(request.url.path)
+        if request.url.path.endswith("/api/models/ornith-ai/model-repo"):
+            return httpx.Response(200, json={"sha": revision})
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "type": "file",
+                    "path": "another-model.gguf",
+                    "lfs": {"oid": "sha256:" + "c" * 64},
+                },
+                {
+                    "type": "file",
+                    "path": "model-Q4_K_M.gguf",
+                    "lfs": {"oid": "sha256:" + digest},
+                },
+            ],
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(metadata_response)) as client:
+        result = resolve_huggingface_model_file(
+            "https://huggingface.co/ornith-ai/model-repo"
+            "?show_file_info=model-Q4_K_M.gguf",
+            client=client,
+        )
+
+    assert result == (
+        "https://huggingface.co/ornith-ai/model-repo/resolve/"
+        f"{revision}/model-Q4_K_M.gguf?download=true",
+        digest,
+    )
+    assert seen == [
+        "/api/models/ornith-ai/model-repo",
+        f"/api/models/ornith-ai/model-repo/tree/{revision}",
+    ]
+
+
+@pytest.mark.parametrize("lfs", [{}, {"oid": "sha256:" + "z" * 64}, None])
+def test_rejects_missing_or_invalid_lfs_sha(lfs):
+    revision = "b" * 40
+
+    def metadata_response(request):
+        if request.url.path.endswith("/api/models/ornith-ai/model-repo"):
+            return httpx.Response(200, json={"sha": revision})
+        return httpx.Response(
+            200,
+            json=[{"type": "file", "path": "model.gguf", "lfs": lfs}],
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(metadata_response)) as client:
+        with pytest.raises(ModelDownloadError, match="metadata could not be verified"):
+            resolve_huggingface_model_file(
+                "https://huggingface.co/ornith-ai/model-repo?show_file_info=model.gguf",
+                client=client,
+            )
+
+
+def test_rejects_metadata_without_an_exact_file_match():
+    revision = "b" * 40
+
+    def metadata_response(request):
+        if request.url.path.endswith("/api/models/ornith-ai/model-repo"):
+            return httpx.Response(200, json={"sha": revision})
+        return httpx.Response(
+            200,
+            json=[{"type": "file", "path": "other.gguf", "lfs": {"oid": "a" * 64}}],
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(metadata_response)) as client:
+        with pytest.raises(ModelDownloadError, match="metadata could not be verified"):
+            resolve_huggingface_model_file(
+                "https://huggingface.co/ornith-ai/model-repo?show_file_info=model.gguf",
+                client=client,
+            )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://huggingface.co/ornith-ai/model-repo",
+        "https://huggingface.co/ornith-ai/model-repo?show_file_info=",
+        "https://huggingface.co/ornith-ai/model-repo/model.gguf"
+        "?show_file_info=other.gguf",
+        "https://example.com/ornith-ai/model-repo?show_file_info=model.gguf",
+        "https://huggingface.co/ornith-ai/model-repo/README.md",
+    ],
+)
+def test_rejects_malformed_or_unsupported_model_file_urls(url):
+    with pytest.raises(ValueError):
+        resolve_huggingface_model_file(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://huggingface.co/org/repo/resolve/main/model.gguf?download=true",
+        "https://huggingface.co/org/repo/blob/main/model.gguf",
+    ],
+)
+def test_resolves_existing_file_url_formats(url):
+    digest = "a" * 64
+
+    def metadata_response(request):
+        assert request.url.path.endswith("/tree/main")
+        return httpx.Response(
+            200,
+            json=[{"type": "file", "path": "model.gguf", "lfs": {"oid": digest}}],
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(metadata_response)) as client:
+        download_url, resolved_digest = resolve_huggingface_model_file(
+            url, client=client
+        )
+
+    assert download_url == (
+        "https://huggingface.co/org/repo/resolve/main/model.gguf?download=true"
+    )
+    assert resolved_digest == digest
 
 
 @pytest.mark.parametrize(

@@ -10,7 +10,7 @@ def _event(**overrides):
     event = {
         "event_id": str(uuid4()),
         "instance_id": "gpu",
-        "download_request_id": request_id,
+        "rollout_request_id": request_id,
         "model_filename": "approved.gguf",
         "config_version": 7,
         "idempotency_key": f"gpu:7:{request_id}",
@@ -133,9 +133,45 @@ def test_unsafe_filename_is_failed_without_kubernetes_access():
     assert b'"outcome":"failed"' in acknowledgments[0]
 
 
+def test_reconciler_targets_secondary_gpu_deployment():
+    event = _event(instance_id="gpu-secondary")
+    event["idempotency_key"] = (
+        f"gpu-secondary:{event['config_version']}:{event['rollout_request_id']}"
+    )
+    paths = []
+
+    def kubernetes(request):
+        paths.append(request.url.path)
+        if request.method == "PATCH":
+            return httpx.Response(200, json=_deployment(generation=3, observed=2))
+        current = _deployment(
+            generation=3,
+            observed=3,
+            args=["--verbose", "--model", "/models/approved.gguf"],
+        )
+        current["spec"]["template"]["metadata"]["annotations"] = {
+            "codefactory.io/model-rollout-idempotency-key": event["idempotency_key"]
+        }
+        return httpx.Response(200, json=current)
+
+    service = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"event_id": event["event_id"], "status": "succeeded"}
+        )
+    )
+
+    result = _reconciler(service, httpx.MockTransport(kubernetes)).process(event)
+
+    assert result == "succeeded"
+    assert paths
+    assert all(
+        path.endswith("/deployments/llama-cpp-server-gpu-secondary") for path in paths
+    )
+
+
 def test_reconciler_fails_ack_when_deployment_does_not_converge():
     event = _event(instance_id="cpu", idempotency_key=None)
-    event["idempotency_key"] = f"cpu:7:{event['download_request_id']}"
+    event["idempotency_key"] = f"cpu:7:{event['rollout_request_id']}"
     acknowledgments = []
     deployment_paths = []
 

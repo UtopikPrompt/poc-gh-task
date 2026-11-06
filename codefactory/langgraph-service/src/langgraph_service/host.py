@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import httpx
 import importlib
 import logging
 import os
@@ -12,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,10 +27,13 @@ from langgraph_service.inference_config import (
 )
 from langgraph_service.inference_metrics import PrometheusInferenceMetrics
 from langgraph_service.model_download import (
+    ModelDownloadError,
+    resolve_huggingface_model_file,
     validate_download_url,
     validate_model_filename,
     validate_sha256,
 )
+from langgraph_service.model_artifact_api import AvailableModelFilenamesResponse
 from langgraph_service.storage.agent_roster_store import (
     AgentRosterSnapshot,
     PostgresAgentRosterStore,
@@ -92,6 +96,23 @@ class InferenceInstanceUpdate(BaseModel):
     )
 
 
+class InferenceInstanceCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    instance_id: InferenceInstance
+    model_filename: str = Field(
+        min_length=6,
+        max_length=205,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$",
+    )
+    created_by: str = Field(
+        strict=True,
+        min_length=1,
+        max_length=39,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$",
+    )
+
+
 class InferenceInstanceRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -110,7 +131,6 @@ class ModelDownloadPayload(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$",
     )
     model_url: str = Field(max_length=4096)
-    model_sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
     requested_by: str = Field(
         min_length=1,
         max_length=39,
@@ -122,7 +142,6 @@ class ModelDownloadRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: UUID
-    instance_id: InferenceInstance
     model_filename: str
     requested_by: str
     status: Literal["queued", "downloading", "verifying", "ready", "failed"]
@@ -143,7 +162,7 @@ class ModelRolloutEvent(BaseModel):
 
     event_id: UUID
     instance_id: InferenceInstance
-    download_request_id: UUID
+    rollout_request_id: UUID
     model_filename: str
     config_version: int
     idempotency_key: str
@@ -199,10 +218,6 @@ class InferenceMetricsResponse(BaseModel):
 
 def _inference_instance_response(snapshot) -> dict[str, object]:
     config = snapshot.config.model_dump()
-    if config["download_error"] is not None and config["download_error"] not in (
-        PUBLIC_FAILURES.values()
-    ):
-        config["download_error"] = PUBLIC_FAILURES["download_failed"]
     if (
         config["rollout_error"] is not None
         and config["rollout_error"] != ROLLOUT_FAILURE
@@ -224,7 +239,6 @@ def _model_download_response(request: ModelDownloadRequest) -> dict[str, object]
         public_error = PUBLIC_FAILURES["download_failed"]
     return {
         "request_id": str(request.request_id),
-        "instance_id": request.instance_id,
         "model_filename": request.model_filename,
         "requested_by": request.requested_by,
         "status": request.status,
@@ -296,6 +310,7 @@ def _roster_response(snapshot: AgentRosterSnapshot) -> dict[str, object]:
 def create_app() -> FastAPI:
     database_url = postgres_url_from_environment("LANGGRAPH", required=True)
     github_service_url = os.environ.get("GITHUB_SERVICE_URL", "").strip()
+    model_artifact_api_url = os.environ.get("MODEL_ARTIFACT_API_URL", "").strip()
     service_token = os.environ.get("INTERNAL_SERVICE_TOKEN", "")
     reconciler_token = os.environ.get("MODEL_RECONCILER_TOKEN", "")
     module_name = (
@@ -397,7 +412,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def redact_download_validation_error(request, _error):
-        if request.url.path.endswith("/model-downloads"):
+        if request.url.path == "/internal/management/inference-model-downloads":
             return JSONResponse(
                 status_code=422,
                 content={"detail": "model download request was rejected"},
@@ -478,9 +493,65 @@ def create_app() -> FastAPI:
         return {
             "instances": [
                 _inference_instance_response(snapshots[instance_id])
-                for instance_id in ("gpu", "cpu")
+                for instance_id in snapshots
             ]
         }
+
+    @app.post(
+        "/internal/management/inference-instances",
+        response_model=InferenceInstanceRecord,
+        status_code=201,
+        dependencies=[Depends(authenticate_internal)],
+    )
+    async def create_inference_instance(payload: InferenceInstanceCreate):
+        config = InferenceInstanceConfig(
+            instance_id=payload.instance_id,
+            model_filename=payload.model_filename,
+        )
+        try:
+            snapshot = await run_in_threadpool(
+                inference_config_store.create,
+                config,
+                created_by=payload.created_by,
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=409, detail="inference instance already exists"
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="inference configuration unavailable"
+            ) from error
+        return _inference_instance_response(snapshot)
+
+    @app.get(
+        "/internal/management/inference-models",
+        response_model=AvailableModelFilenamesResponse,
+        dependencies=[Depends(authenticate_internal)],
+    )
+    async def get_available_inference_models(request: Request):
+        if not model_artifact_api_url or not reconciler_token:
+            raise HTTPException(
+                status_code=503, detail="available model listing unavailable"
+            )
+        transport = getattr(request.app.state, "model_artifact_http_transport", None)
+        try:
+            async with httpx.AsyncClient(
+                base_url=model_artifact_api_url.rstrip("/"),
+                transport=transport,
+                timeout=10.0,
+            ) as client:
+                response = await client.get(
+                    "/internal/models/available",
+                    headers={"Authorization": f"Bearer {reconciler_token}"},
+                )
+            response.raise_for_status()
+            record = AvailableModelFilenamesResponse.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, TypeError) as error:
+            raise HTTPException(
+                status_code=503, detail="available model listing unavailable"
+            ) from error
+        return record.model_dump(mode="json")
 
     @app.put(
         "/internal/management/inference-instances/{instance_id}",
@@ -521,39 +592,67 @@ def create_app() -> FastAPI:
             ) from error
         return _inference_instance_response(snapshot)
 
+    @app.delete(
+        "/internal/management/inference-instances/{instance_id}",
+        dependencies=[Depends(authenticate_internal)],
+    )
+    async def delete_inference_instance(instance_id: InferenceInstance):
+        try:
+            await run_in_threadpool(inference_config_store.delete, instance_id)
+        except ValueError as error:
+            detail = str(error)
+            if detail == "unknown inference instance":
+                raise HTTPException(status_code=404, detail=detail) from error
+            if detail in {
+                "inference model download is active",
+                "inference model rollout is active",
+                "at least one inference instance must remain",
+            }:
+                raise HTTPException(status_code=409, detail=detail) from error
+            raise HTTPException(
+                status_code=422, detail="inference instance deletion was rejected"
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="inference configuration unavailable"
+            ) from error
+        return {"deleted": True, "instance_id": instance_id}
+
     @app.post(
-        "/internal/management/inference-instances/{instance_id}/model-downloads",
+        "/internal/management/inference-model-downloads",
         response_model=ModelDownloadRecord,
         status_code=202,
         dependencies=[Depends(authenticate_internal)],
     )
-    async def request_model_download(
-        instance_id: InferenceInstance, payload: ModelDownloadPayload
-    ):
+    async def request_model_download(payload: ModelDownloadPayload):
         try:
             if len(payload.model_url) > 4096:
                 raise ValueError("model URL is too long")
             validate_model_filename(payload.model_filename)
-            validate_download_url(payload.model_url)
-            validate_sha256(payload.model_sha256)
+            download_url, sha256 = await run_in_threadpool(
+                resolve_huggingface_model_file, payload.model_url
+            )
+            validate_download_url(download_url)
+            validate_sha256(sha256)
             request = await run_in_threadpool(
                 model_download_store.submit,
-                instance_id=instance_id,
                 model_filename=payload.model_filename,
-                model_url=payload.model_url,
-                model_sha256=payload.model_sha256,
+                model_url=download_url,
+                model_sha256=sha256,
                 requested_by=payload.requested_by,
             )
-        except ValueError as error:
-            active = str(error) == "an inference model download is already active"
-            rollout_active = str(error) == "an inference model rollout is active"
+        except ModelDownloadError as error:
             raise HTTPException(
-                status_code=409 if active or rollout_active else 422,
+                status_code=422,
+                detail="Hugging Face model file could not be verified",
+            ) from error
+        except ValueError as error:
+            active = str(error) == "a shared model download is already active"
+            raise HTTPException(
+                status_code=409 if active else 422,
                 detail=(
-                    "an inference model download or rollout is active"
+                    "a shared model download is already active"
                     if active
-                    else "an inference model rollout is active"
-                    if rollout_active
                     else "model download request was rejected"
                 ),
             ) from error
@@ -632,7 +731,15 @@ def create_app() -> FastAPI:
         dependencies=[Depends(authenticate_internal)],
     )
     async def get_inference_metrics():
-        return await run_in_threadpool(inference_metrics.get_metrics)
+        try:
+            snapshots = await run_in_threadpool(inference_config_store.get_all)
+            return await run_in_threadpool(
+                inference_metrics.get_metrics, tuple(snapshots)
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="inference metrics unavailable"
+            ) from error
 
     @app.get(
         "/internal/management/agent-roster",

@@ -5,6 +5,7 @@ metadata:
 data:
   GITHUB_SERVICE_URL: http://github-service:8000
   LANGGRAPH_SERVICE_URL: http://langgraph-service:8001
+  MODEL_ARTIFACT_API_URL: http://inference-model-artifact-api.inference.svc.cluster.local:8000
   LLAMA_CPP_URL: http://llama-cpp-server.inference.svc.cluster.local:8080
   PROMETHEUS_URL: http://prometheus.inference.svc.cluster.local:9090
   WORKFLOW_OPERATIONS_MODULE: langgraph_service.workflow.workflow_operations

@@ -593,13 +593,51 @@ def test_workflow_dashboard_page_is_served_by_management_portal(tmp_path):
     assert settings_page.status_code == 200
     assert "Agent configuration" in settings_page.text
     assert 'href="/settings" aria-current="page"' in settings_page.text
+    assert (
+        settings_page.text.index('id="agent-roster-heading"')
+        < settings_page.text.index('id="inference-heading"')
+        < settings_page.text.index('id="agent-config-heading"')
+    )
     assert "agent-config-form" in settings_page.text
-    assert 'id="gpu-model-filename"' in settings_page.text
-    assert 'id="cpu-model-filename"' in settings_page.text
-    assert 'id="gpu-model-url"' in settings_page.text
-    assert 'id="cpu-model-url"' in settings_page.text
-    assert 'id="gpu-model-sha256"' in settings_page.text
-    assert 'id="cpu-model-sha256"' in settings_page.text
+    assert 'id="inference-instance-list"' in settings_page.text
+    assert 'id="inference-instance-template"' in settings_page.text
+    assert 'id="inference-instance-create-form"' in settings_page.text
+    assert 'name="instance_id"' in settings_page.text
+    assert 'class="delete-inference-instance"' in settings_page.text
+    assert "A matching inference Deployment must" in settings_page.text
+    assert 'id="model-download-form"' in settings_page.text
+    assert 'id="model-download-instance"' not in settings_page.text
+    assert "Download to shared storage" in settings_page.text
+    assert "Instance to update" not in settings_page.text
+    assert '<label for="model-download-filename">Save as</label>' in settings_page.text
+    assert (
+        '<label for="model-download-url">Hugging Face model file URL</label>'
+        in settings_page.text
+    )
+    assert (
+        'class="download-model" type="submit" disabled>Download</button>'
+        in settings_page.text
+    )
+    assert "added to shared storage" in settings_page.text
+    assert "Assign it to an instance separately with Apply model." in settings_page.text
+    assert (
+        settings_page.text.index("Hugging Face model file URL")
+        < settings_page.text.index("Save as")
+        < settings_page.text.index(">Download</button>")
+    )
+    assert 'id="model-catalog-status"' in settings_page.text
+    assert 'id="toast-region"' in settings_page.text
+    assert settings_page.text.count('class="download-model"') == 1
+    assert 'name="model_filename"' in settings_page.text
+    assert (
+        '<select id="model-filename" class="instance-model-input" name="model_filename"'
+        in settings_page.text
+    )
+    assert 'name="model_url"' in settings_page.text
+    assert 'name="model_sha256"' not in settings_page.text
+    assert 'data-instance="gpu"' not in settings_page.text
+    assert "CPU / GPU" in settings_page.text
+    assert "RAM / VRAM" in settings_page.text
     assert 'id="inference-metrics-body"' in settings_page.text
     assert 'id="model-profile"' not in settings_page.text
     assert "/management-portal/assets/settings.js" in settings_page.text
@@ -618,8 +656,59 @@ def test_workflow_dashboard_page_is_served_by_management_portal(tmp_path):
     )
     assert "data-role-assignment" in settings_script.text
     assert "createProfileEditor" in settings_script.text
+    assert "syncInferenceInstanceForms" in settings_script.text
+    assert "async function createInferenceInstance(event)" in settings_script.text
+    assert "async function deleteInferenceInstance(instanceId)" in settings_script.text
+    assert "method: 'POST'" in settings_script.text
+    assert "method: 'DELETE'" in settings_script.text
+    assert (
+        "function renderModelSelection(form, selectedFilename)" in settings_script.text
+    )
+    assert "select.value = selectedFilename" in settings_script.text
+    assert "(missing from shared model storage)" in settings_script.text
+    assert "Choose an available model or request its download." in settings_script.text
+    assert "Checking Hugging Face file metadata..." in settings_script.text
+    assert "function suggestModelFilenameFromUrl()" in settings_script.text
+    assert "parsed.pathname.split('/').pop()" in settings_script.text
+    assert "decodeURIComponent(encodedBasename || '')" in settings_script.text
+    assert "if (!modelDownloadFilenameManuallyEdited)" in settings_script.text
+    assert "modelDownloadFilenameManuallyEdited = true" in settings_script.text
+    request_handler = settings_script.text.split(
+        "async function requestInferenceModelDownload(event)", 1
+    )[1].split("async function pollInferenceDownloads()", 1)[0]
+    assert request_handler.index(
+        "showDownloadStatus('resolving')"
+    ) < request_handler.index("await fetch('/api/inference-model-downloads'")
+    assert "Hugging Face file could not be verified." in settings_script.text
+    assert "Download queued; checksum metadata verified." in settings_script.text
+    assert "downloadStatus.textContent = message;" in settings_script.text
+    assert (
+        "fetch(`/api/inference-model-downloads/${download.requestId}`"
+        in settings_script.text
+    )
+    assert (
+        "if (downloadBecameTerminal || rolloutActive) await loadInferenceInstances({ quiet: true });"
+        in settings_script.text
+    )
+    assert "function showToast(message, state = 'info')" in settings_script.text
+    assert "CPU: ${cpu} | GPU: ${gpu}" in settings_script.text
+    assert "RAM: ${ram} | VRAM used: ${used}; total: ${total}" in settings_script.text
+    assert ".inference-instance-list" in stylesheet.text
+    assert (
+        ".inference-instance-list {\n    display: flex;\n    flex-direction: column;"
+        in stylesheet.text
+    )
+    assert (
+        "display: flex;\n    flex-direction: column;\n    gap: 16px;" in stylesheet.text
+    )
+    assert (
+        ".inference-model-config .config-controls input {\n    flex-basis: auto;"
+        in stylesheet.text
+    )
+    assert ".config-controls input {\n    flex: 0 1 520px;" in stylesheet.text
+    assert "#completion-timeout {\n    max-width: 180px;" in stylesheet.text
     assert "Save roster" in settings_page.text
-    assert ".settings-page :focus-visible" in stylesheet.text
+    assert ":focus-visible {" in stylesheet.text
     assert "No workflow records are available yet." in script.text
     assert "Workflow state is unavailable." in script.text
     assert "fetch('/api/workflows'" in script.text
@@ -644,6 +733,64 @@ def test_workflow_dashboard_page_is_served_by_management_portal(tmp_path):
     assert "resolve-no-ci" in script.text
     assert "Operator decision:" in script.text
     assert "#f3f6f5" in stylesheet.text
+
+
+def test_inference_model_selection_builds_accessible_single_choice_dropdown(tmp_path):
+    app = _create_app(tmp_path)
+
+    with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        settings_page = client.get("/settings")
+        settings_script = client.get("/management-portal/assets/settings.js")
+
+    assert settings_page.status_code == settings_script.status_code == 200
+    select_markup = settings_page.text.split('<select id="model-filename"', 1)[1].split(
+        "</select>", 1
+    )[0]
+    assert 'name="model_filename"' in select_markup
+    assert "required" in select_markup
+    assert 'size="1"' in select_markup
+    assert "multiple" not in select_markup
+    assert '<button type="submit" disabled>Apply model</button>' in settings_page.text
+    assert (
+        'class="apply-model-help audit-line" role="status" aria-live="polite"'
+        in settings_page.text
+    )
+
+    create_form = settings_script.text.split(
+        "function createInferenceInstanceForm(instanceId)", 1
+    )[1].split("function renderModelSelection", 1)[0]
+    assert "selectionStatus.id = `${prefix}-model-selection-status`" in create_form
+    assert (
+        "form.elements.model_filename.setAttribute('aria-describedby', selectionStatus.id)"
+        in create_form
+    )
+    assert "applyButton.textContent = 'Apply model'" in create_form
+    assert "applyButton.setAttribute('aria-describedby', applyHelp.id)" in create_form
+
+    save_state = settings_script.text.split(
+        "function updateInferenceSaveState(form)", 1
+    )[1].split("function updateModelDownloadButton()", 1)[0]
+    assert "(unchanged && status === 'ready')" in save_state
+    assert "status = form.dataset.rolloutStatus || 'not_requested'" in save_state
+    assert "|| unchanged" not in save_state
+    assert (
+        "This filename is already selected. Choose a different available model to enable Apply model."
+        in save_state
+    )
+    assert (
+        "No rollout has been requested for this selection. Apply model to request one."
+        in save_state
+    )
+    assert "The previous rollout failed. Apply model to retry." in save_state
+
+    render_selection = settings_script.text.split(
+        "function renderModelSelection(form, selectedFilename)", 1
+    )[1].split("function syncInferenceInstanceForms", 1)[0]
+    assert "document.createElement('option')" in render_selection
+    assert "option.value = filename" in render_selection
+    assert "option.textContent = filename" in render_selection
+    assert "select.append(option)" in render_selection
 
 
 def test_dashboard_and_api_require_a_valid_session(tmp_path):
@@ -1029,6 +1176,8 @@ def test_local_preview_serves_live_data_without_auth_and_blocks_writes():
 
     def langgraph_response(request):
         langgraph_requests.append(request)
+        if request.url.path.endswith("/inference-models"):
+            return httpx.Response(200, json={"models": ["live-model.gguf"]})
         if request.url.path.endswith("/agent-config"):
             return httpx.Response(
                 200,
@@ -1101,6 +1250,7 @@ def test_local_preview_serves_live_data_without_auth_and_blocks_writes():
         settings_script = client.get("/management-portal/assets/settings.js")
         workflows = client.get("/api/workflows")
         config = client.get("/api/agent-config")
+        models = client.get("/api/inference-models")
         roster = client.get("/api/agent-roster")
         executions = client.get("/api/executions")
         detail = client.get("/api/executions/live-task")
@@ -1128,6 +1278,7 @@ def test_local_preview_serves_live_data_without_auth_and_blocks_writes():
     assert config.json()["preview"] is True
     assert config.json()["can_edit"] is False
     assert config.json()["version"] == 2
+    assert models.json() == {"models": ["live-model.gguf"], "preview": True}
     assert roster.status_code == 200
     assert roster.json()["revision"] == 3
     assert roster.json()["can_edit"] is False
@@ -1137,7 +1288,7 @@ def test_local_preview_serves_live_data_without_auth_and_blocks_writes():
     assert updated.status_code == 403
     assert updated_roster.status_code == 403
     assert [request.method for request in github_requests] == ["GET"]
-    assert [request.method for request in langgraph_requests] == ["GET"] * 4
+    assert [request.method for request in langgraph_requests] == ["GET"] * 5
     assert all(
         request.headers["Authorization"] == "Bearer portal-preview-service-token"
         for request in github_requests + langgraph_requests
@@ -1423,6 +1574,47 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
 
     def langgraph_response(request):
         forwarded.append(request)
+        if request.url.path == "/internal/management/inference-models":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        "qwen2.5-32b-instruct-q4_k_m.gguf",
+                        "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                        "second-gpu.gguf",
+                        "new-gpu-model.gguf",
+                    ]
+                },
+            )
+        if request.method == "POST":
+            assert request.url.path == "/internal/management/inference-instances"
+            assert json.loads(request.content) == {
+                "instance_id": "gpu-new",
+                "model_filename": "new-gpu-model.gguf",
+                "created_by": "verified-owner",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "config": {
+                        "instance_id": "gpu-new",
+                        "model_filename": "new-gpu-model.gguf",
+                        "rollout_status": "not_requested",
+                    },
+                    "version": 1,
+                    "updated_at": "2026-11-04T12:00:00+00:00",
+                    "updated_by": "verified-owner",
+                },
+            )
+        if request.method == "DELETE":
+            assert (
+                request.url.path
+                == "/internal/management/inference-instances/cpu-secondary"
+            )
+            return httpx.Response(
+                200,
+                json={"deleted": True, "instance_id": "cpu-secondary"},
+            )
         if request.method == "GET":
             return httpx.Response(
                 200,
@@ -1432,7 +1624,6 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
                             "config": {
                                 "instance_id": "gpu",
                                 "model_filename": "qwen2.5-32b-instruct-q4_k_m.gguf",
-                                "download_status": "ready",
                                 "rollout_status": "pending",
                                 "rollout_request_id": "00000000-0000-0000-0000-000000000001",
                                 "rollout_error": None,
@@ -1445,10 +1636,29 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
                             "config": {
                                 "instance_id": "cpu",
                                 "model_filename": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
-                                "download_status": "ready",
                                 "rollout_status": "not_requested",
                                 "rollout_request_id": None,
                                 "rollout_error": None,
+                            },
+                            "version": 0,
+                            "updated_at": None,
+                            "updated_by": None,
+                        },
+                        {
+                            "config": {
+                                "instance_id": "gpu-secondary",
+                                "model_filename": "second-gpu.gguf",
+                                "rollout_status": "not_requested",
+                            },
+                            "version": 0,
+                            "updated_at": None,
+                            "updated_by": None,
+                        },
+                        {
+                            "config": {
+                                "instance_id": "cpu-secondary",
+                                "model_filename": "second-cpu.gguf",
+                                "rollout_status": "not_requested",
                             },
                             "version": 0,
                             "updated_at": None,
@@ -1459,7 +1669,7 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
             )
         body = json.loads(request.content)
         assert body == {
-            "instance_id": "gpu",
+            "instance_id": "gpu-secondary",
             "model_filename": "new-gpu-model.gguf",
             "updated_by": "verified-owner",
         }
@@ -1467,7 +1677,7 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
             200,
             json={
                 "config": {
-                    "instance_id": "gpu",
+                    "instance_id": "gpu-secondary",
                     "model_filename": "new-gpu-model.gguf",
                     "rollout_status": "not_requested",
                 },
@@ -1479,17 +1689,60 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
 
     app.state.langgraph_http_transport = httpx.MockTransport(langgraph_response)
     with TestClient(app, base_url="https://testserver") as client:
+        _login(client)
+        member_models = client.get("/api/inference-models")
+        member_create = client.post(
+            "/api/inference-instances",
+            headers={"Origin": "https://testserver"},
+            json={"instance_id": "gpu-new", "model_filename": "new-gpu-model.gguf"},
+        )
         _login_as_owner(client, app)
         instances = client.get("/api/inference-instances")
+        available_models = client.get("/api/inference-models")
         updated = client.put(
-            "/api/inference-instances/gpu",
+            "/api/inference-instances/gpu-secondary",
             headers={"Origin": "https://testserver"},
             json={"model_filename": "new-gpu-model.gguf"},
         )
+        unavailable_update = client.put(
+            "/api/inference-instances/gpu-secondary",
+            headers={"Origin": "https://testserver"},
+            json={"model_filename": "not-present.gguf"},
+        )
+        created = client.post(
+            "/api/inference-instances",
+            headers={"Origin": "https://testserver"},
+            json={"instance_id": "gpu-new", "model_filename": "new-gpu-model.gguf"},
+        )
+        invalid_create = client.post(
+            "/api/inference-instances",
+            headers={"Origin": "https://testserver"},
+            json={"instance_id": "gpu-new", "model_filename": "not-present.gguf"},
+        )
+        wrong_origin_delete = client.delete(
+            "/api/inference-instances/cpu-secondary",
+            headers={"Origin": "https://attacker.test"},
+        )
+        deleted = client.delete(
+            "/api/inference-instances/cpu-secondary",
+            headers={"Origin": "https://testserver"},
+        )
 
-    assert instances.status_code == updated.status_code == 200
+    assert member_models.status_code == 403
+    assert member_create.status_code == 403
+    assert (
+        instances.status_code
+        == available_models.status_code
+        == updated.status_code
+        == 200
+    )
+    assert available_models.json()["models"][-1] == "new-gpu-model.gguf"
+    assert "second-cpu.gguf" in [
+        item["config"]["model_filename"] for item in instances.json()["instances"]
+    ]
+    assert "second-cpu.gguf" not in available_models.json()["models"]
     assert instances.json()["can_edit"] is True
-    assert instances.json()["instances"][0]["config"]["download_status"] == "ready"
+    assert "download_status" not in instances.json()["instances"][0]["config"]
     assert instances.json()["instances"][0]["config"]["rollout_status"] == "pending"
     assert instances.json()["instances"][0]["config"]["rollout_request_id"] == (
         "00000000-0000-0000-0000-000000000001"
@@ -1499,9 +1752,39 @@ def test_inference_instance_api_is_owner_only_and_forwards_scoped_updates(tmp_pa
     ] == [
         "qwen2.5-32b-instruct-q4_k_m.gguf",
         "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "second-gpu.gguf",
+        "second-cpu.gguf",
     ]
     assert updated.json()["config"]["model_filename"] == "new-gpu-model.gguf"
-    assert [request.method for request in forwarded] == ["GET", "PUT"]
+    assert unavailable_update.status_code == 422
+    assert created.status_code == 200
+    assert created.json()["config"]["instance_id"] == "gpu-new"
+    assert invalid_create.status_code == 422
+    assert wrong_origin_delete.status_code == 403
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "instance_id": "cpu-secondary"}
+    assert [request.method for request in forwarded] == [
+        "GET",
+        "GET",
+        "GET",
+        "PUT",
+        "GET",
+        "GET",
+        "POST",
+        "GET",
+        "DELETE",
+    ]
+    assert [request.url.path for request in forwarded] == [
+        "/internal/management/inference-instances",
+        "/internal/management/inference-models",
+        "/internal/management/inference-models",
+        "/internal/management/inference-instances/gpu-secondary",
+        "/internal/management/inference-models",
+        "/internal/management/inference-models",
+        "/internal/management/inference-instances",
+        "/internal/management/inference-models",
+        "/internal/management/inference-instances/cpu-secondary",
+    ]
 
 
 def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_path):
@@ -1512,18 +1795,20 @@ def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_
     def langgraph_response(request):
         forwarded.append(request)
         if request.method == "POST":
-            assert request.url.path.endswith("/gpu/model-downloads")
-            assert json.loads(request.content) == {
+            assert request.url.path == "/internal/management/inference-model-downloads"
+            payload = json.loads(request.content)
+            if "token=" in payload["model_url"]:
+                return httpx.Response(422, json={"detail": "request rejected"})
+            assert payload == {
                 "model_filename": "model.gguf",
-                "model_url": "https://huggingface.co/org/repo/model.gguf",
-                "model_sha256": "a" * 64,
+                "model_url": "https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+                "?show_file_info=Ornith-1.5-35B-Q4_K_M.gguf",
                 "requested_by": "verified-owner",
             }
             return httpx.Response(
                 202,
                 json={
                     "request_id": request_id,
-                    "instance_id": "gpu",
                     "model_filename": "model.gguf",
                     "requested_by": "verified-owner",
                     "status": "queued",
@@ -1538,7 +1823,6 @@ def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_
                 200,
                 json={
                     "request_id": request_id,
-                    "instance_id": "gpu",
                     "model_filename": "model.gguf",
                     "requested_by": "verified-owner",
                     "status": "failed",
@@ -1567,7 +1851,7 @@ def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_
                         "vram_total_bytes": {"value": None, "status": "unavailable"},
                         "sampled_at": None,
                     }
-                    for instance in ("gpu", "cpu")
+                    for instance in ("gpu", "cpu", "gpu-secondary", "cpu-secondary")
                 ]
             },
         )
@@ -1577,31 +1861,39 @@ def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_
         _login(client)
         member_read = client.get("/api/inference-instances")
         member_submit = client.post(
-            "/api/inference-instances/gpu/model-downloads",
+            "/api/inference-model-downloads",
             headers={"Origin": "https://testserver"},
             json={
                 "model_filename": "model.gguf",
-                "model_url": "https://huggingface.co/org/repo/model.gguf",
-                "model_sha256": "a" * 64,
+                "model_url": "https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+                "?show_file_info=Ornith-1.5-35B-Q4_K_M.gguf",
             },
         )
         member_status = client.get(f"/api/inference-model-downloads/{request_id}")
         _login_as_owner(client, app)
         submitted = client.post(
+            "/api/inference-model-downloads",
+            headers={"Origin": "https://testserver"},
+            json={
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+                "?show_file_info=Ornith-1.5-35B-Q4_K_M.gguf",
+            },
+        )
+        malformed = client.post(
+            "/api/inference-model-downloads",
+            headers={"Origin": "https://testserver"},
+            json={
+                "model_filename": "model.gguf",
+                "model_url": "https://huggingface.co/model?token=credential-marker",
+            },
+        )
+        legacy_route = client.post(
             "/api/inference-instances/gpu/model-downloads",
             headers={"Origin": "https://testserver"},
             json={
                 "model_filename": "model.gguf",
                 "model_url": "https://huggingface.co/org/repo/model.gguf",
-                "model_sha256": "a" * 64,
-            },
-        )
-        malformed = client.post(
-            "/api/inference-instances/gpu/model-downloads",
-            headers={"Origin": "https://testserver"},
-            json={
-                "model_filename": "model.gguf",
-                "model_url": "https://huggingface.co/model?token=credential-marker",
             },
         )
         status = client.get(f"/api/inference-model-downloads/{request_id}")
@@ -1615,11 +1907,20 @@ def test_model_download_and_metrics_routes_enforce_owner_and_project_status(tmp_
     )
     assert submitted.status_code == status.status_code == metrics.status_code == 200
     assert malformed.status_code == 422
+    assert legacy_route.status_code == 404
     assert "credential-marker" not in malformed.text
     assert submitted.json()["status"] == "queued"
+    assert "instance_id" not in submitted.json()
     assert status.json()["public_error"] == "Model artifact SHA-256 did not match."
     assert [item["instance_id"] for item in metrics.json()["instances"]] == [
         "gpu",
         "cpu",
+        "gpu-secondary",
+        "cpu-secondary",
     ]
-    assert [request.method for request in forwarded] == ["POST", "GET", "GET"]
+    assert [request.method for request in forwarded] == [
+        "POST",
+        "POST",
+        "GET",
+        "GET",
+    ]

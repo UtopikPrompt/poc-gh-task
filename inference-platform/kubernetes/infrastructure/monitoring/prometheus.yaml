@@ -37,6 +37,10 @@ data:
             target_label: inference_instance
             regex: llama-cpp-server-cpu-.+
             replacement: cpu
+          - source_labels: [pod]
+            target_label: inference_instance
+            regex: llama-cpp-server-(gpu-[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?|cpu-[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?)-[a-z0-9]{9,10}-[a-z0-9]{5}
+            replacement: $1
       - job_name: inference-dcgm
         honor_labels: true
         static_configs:
@@ -49,7 +53,11 @@ data:
             regex: DCGM_FI_DEV_GPU_UTIL|DCGM_FI_DEV_FB_USED|DCGM_FI_DEV_FB_FREE
           - source_labels: [namespace, pod]
             action: keep
-            regex: inference;llama-cpp-server-[a-z0-9]{9,10}-[a-z0-9]{5}
+            regex: inference;llama-cpp-server-([a-z0-9]{9,10}|gpu-[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?-[a-z0-9]{9,10})-[a-z0-9]{5}
+          - source_labels: [pod]
+            target_label: inference_instance
+            regex: llama-cpp-server-(gpu-[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?)-[a-z0-9]{9,10}-[a-z0-9]{5}
+            replacement: $1
   cpu-limit-rules.yaml: |
     groups:
       - name: inference-cpu-limits

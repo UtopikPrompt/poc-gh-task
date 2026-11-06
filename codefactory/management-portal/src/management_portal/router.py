@@ -7,7 +7,7 @@ import httpx
 from pathlib import Path
 import re
 import secrets
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote, urlencode, urlsplit
 from uuid import UUID
 
@@ -19,7 +19,7 @@ from fastapi.responses import (
     PlainTextResponse,
     RedirectResponse,
 )
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from fastapi.staticfiles import StaticFiles
 
 from management_portal.auth import (
@@ -44,6 +44,12 @@ from management_portal.settings import PortalSettings
 ASSETS_DIRECTORY = Path(__file__).parent / "assets"
 PORTAL_HTML = (ASSETS_DIRECTORY / "index.html").read_text(encoding="utf-8")
 SETTINGS_HTML = (ASSETS_DIRECTORY / "settings.html").read_text(encoding="utf-8")
+InferenceInstanceId = Annotated[
+    str,
+    StringConstraints(
+        pattern=r"^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$",
+    ),
+]
 
 
 class AgentConfigPayload(BaseModel):
@@ -71,25 +77,21 @@ class InferenceInstancePayload(BaseModel):
     )
 
 
+class InferenceInstanceCreatePayload(InferenceInstancePayload):
+    instance_id: InferenceInstanceId
+
+
 class InferenceInstanceConfigRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    instance_id: Literal["gpu", "cpu"]
+    instance_id: InferenceInstanceId
     model_filename: str = Field(
         min_length=6,
         max_length=205,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$",
     )
-    model_url: str | None = None
-    model_sha256: str | None = Field(default=None, pattern=r"^[A-Fa-f0-9]{64}$")
-    download_status: Literal[
-        "queued", "downloading", "verifying", "ready", "failed"
-    ] = "ready"
-    download_request_id: str | None = None
-    download_error: str | None = None
     rollout_status: Literal[
         "not_requested",
-        "waiting_for_download",
         "pending",
         "rolling_out",
         "ready",
@@ -111,15 +113,30 @@ class InferenceInstanceRecord(BaseModel):
 class InferenceInstancesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    instances: list[InferenceInstanceRecord] = Field(min_length=2, max_length=2)
+    instances: list[InferenceInstanceRecord] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_instances(self) -> InferenceInstancesResponse:
-        if {instance.config.instance_id for instance in self.instances} != {
-            "gpu",
-            "cpu",
-        }:
-            raise ValueError("both inference instances must be present exactly once")
+        instance_ids = [instance.config.instance_id for instance in self.instances]
+        if len(set(instance_ids)) != len(instance_ids):
+            raise ValueError("inference instance IDs must be unique")
+        return self
+
+
+class AvailableModelFilenamesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    models: list[str]
+
+    @model_validator(mode="after")
+    def validate_models(self) -> AvailableModelFilenamesResponse:
+        if len(set(self.models)) != len(self.models):
+            raise ValueError("model filenames must be unique")
+        if any(
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf", filename)
+            for filename in self.models
+        ):
+            raise ValueError("model filename is invalid")
         return self
 
 
@@ -132,14 +149,12 @@ class ModelDownloadPayload(BaseModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$",
     )
     model_url: str = Field(max_length=4096)
-    model_sha256: str = Field(pattern=r"^[A-Fa-f0-9]{64}$")
 
 
 class ModelDownloadRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     request_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
-    instance_id: Literal["gpu", "cpu"]
     model_filename: str
     requested_by: str
     status: Literal["queued", "downloading", "verifying", "ready", "failed"]
@@ -159,7 +174,7 @@ class InferenceMetricValue(BaseModel):
 class InferenceInstanceMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    instance_id: Literal["gpu", "cpu"]
+    instance_id: InferenceInstanceId
     cpu_utilization_percent: InferenceMetricValue
     ram_used_bytes: InferenceMetricValue
     gpu_utilization_percent: InferenceMetricValue
@@ -171,7 +186,7 @@ class InferenceInstanceMetrics(BaseModel):
 class InferenceMetricsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    instances: list[InferenceInstanceMetrics] = Field(min_length=2, max_length=2)
+    instances: list[InferenceInstanceMetrics]
 
 
 class AgentProfileRecord(BaseModel):
@@ -717,16 +732,123 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             "can_edit": True,
         }
 
+    @router.post("/api/inference-instances")
+    async def create_inference_instance(
+        request: Request,
+        payload: InferenceInstanceCreatePayload,
+    ) -> dict[str, object]:
+        login = _dashboard_login(request, settings)
+        if not dashboard_session_is_owner(request, settings):
+            raise HTTPException(status_code=403, detail="organization owner required")
+        _require_same_origin_https(request)
+        available_payload = await _langgraph_request(
+            request,
+            settings,
+            method="GET",
+            path="/internal/management/inference-models",
+        )
+        try:
+            available_models = AvailableModelFilenamesResponse.model_validate(
+                available_payload
+            ).models
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="available model listing unavailable"
+            ) from error
+        if payload.model_filename not in available_models:
+            raise HTTPException(
+                status_code=422, detail="selected model is not present in storage"
+            )
+        response = await _langgraph_request(
+            request,
+            settings,
+            method="POST",
+            path="/internal/management/inference-instances",
+            conflict_detail="inference instance already exists",
+            unprocessable_detail="inference instance configuration was rejected",
+            json_body={
+                **payload.model_dump(),
+                "created_by": login,
+            },
+        )
+        try:
+            return InferenceInstanceRecord.model_validate(response).model_dump(
+                mode="json"
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="inference configuration unavailable"
+            ) from error
+
+    @router.delete("/api/inference-instances/{instance_id}")
+    async def delete_inference_instance(
+        request: Request,
+        instance_id: InferenceInstanceId,
+    ) -> dict[str, object]:
+        _dashboard_login(request, settings)
+        if not dashboard_session_is_owner(request, settings):
+            raise HTTPException(status_code=403, detail="organization owner required")
+        _require_same_origin_https(request)
+        return await _langgraph_request(
+            request,
+            settings,
+            method="DELETE",
+            path=f"/internal/management/inference-instances/{instance_id}",
+            not_found_detail="inference instance not found",
+            conflict_detail=(
+                "inference instance cannot be deleted while active or because it is the last instance"
+            ),
+            unprocessable_detail="inference instance deletion was rejected",
+        )
+
+    @router.get("/api/inference-models")
+    async def inference_models(request: Request) -> dict[str, object]:
+        _dashboard_login(request, settings)
+        if not dashboard_session_is_owner(request, settings):
+            raise HTTPException(status_code=403, detail="organization owner required")
+        payload = await _langgraph_request(
+            request,
+            settings,
+            method="GET",
+            path="/internal/management/inference-models",
+        )
+        try:
+            return AvailableModelFilenamesResponse.model_validate(payload).model_dump(
+                mode="json"
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="available model listing unavailable"
+            ) from error
+
     @router.put("/api/inference-instances/{instance_id}")
     async def update_inference_instance(
         request: Request,
-        instance_id: Literal["gpu", "cpu"],
+        instance_id: InferenceInstanceId,
         payload: InferenceInstancePayload,
     ) -> dict[str, object]:
         login = _dashboard_login(request, settings)
         if not dashboard_session_is_owner(request, settings):
             raise HTTPException(status_code=403, detail="organization owner required")
         _require_same_origin_https(request)
+        available_payload = await _langgraph_request(
+            request,
+            settings,
+            method="GET",
+            path="/internal/management/inference-models",
+        )
+        try:
+            available_models = AvailableModelFilenamesResponse.model_validate(
+                available_payload
+            ).models
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="available model listing unavailable"
+            ) from error
+        if payload.model_filename not in available_models:
+            raise HTTPException(
+                status_code=422, detail="selected model is not present in storage"
+            )
         response = await _langgraph_request(
             request,
             settings,
@@ -799,10 +921,9 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             ) from error
         return record.model_dump(mode="json")
 
-    @router.post("/api/inference-instances/{instance_id}/model-downloads")
+    @router.post("/api/inference-model-downloads")
     async def request_inference_model_download(
         request: Request,
-        instance_id: Literal["gpu", "cpu"],
         payload: ModelDownloadPayload,
     ) -> dict[str, object]:
         login = _dashboard_login(request, settings)
@@ -813,8 +934,8 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             request,
             settings,
             method="POST",
-            path=f"/internal/management/inference-instances/{instance_id}/model-downloads",
-            conflict_detail="an inference model download or rollout is active",
+            path="/internal/management/inference-model-downloads",
+            conflict_detail="a shared model download is already active",
             unprocessable_detail="model download request was rejected",
             json_body={**payload.model_dump(), "requested_by": login},
         )

@@ -3,3 +3,4 @@ kind: Kustomization
 resources:
 - config.yaml
 - deployment.yaml
+- artifact-api.yaml

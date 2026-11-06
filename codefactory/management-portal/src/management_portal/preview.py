@@ -15,6 +15,7 @@ from management_portal.router import (
     SETTINGS_HTML,
     AgentConfigRecord,
     AgentRosterResponse,
+    AvailableModelFilenamesResponse,
     ExecutionDetail,
     ExecutionList,
     InferenceMetricsResponse,
@@ -122,6 +123,22 @@ def create_app(settings: PortalSettings | None = None) -> FastAPI:
             ) from error
         return {**record.model_dump(mode="json"), "can_edit": False, "preview": True}
 
+    @app.get("/api/inference-models")
+    async def get_inference_models(request: Request) -> dict[str, object]:
+        payload = await _langgraph_request(
+            request,
+            settings,
+            method="GET",
+            path="/internal/management/inference-models",
+        )
+        try:
+            record = AvailableModelFilenamesResponse.model_validate(payload)
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="available model listing unavailable"
+            ) from error
+        return {**record.model_dump(mode="json"), "preview": True}
+
     @app.get("/api/inference-metrics")
     async def get_inference_metrics(request: Request) -> dict[str, object]:
         payload = await _langgraph_request(
@@ -167,7 +184,7 @@ def create_app(settings: PortalSettings | None = None) -> FastAPI:
     async def update_inference_instance() -> None:
         raise HTTPException(status_code=403, detail="local preview is read-only")
 
-    @app.post("/api/inference-instances/{instance_id}/model-downloads")
+    @app.post("/api/inference-model-downloads")
     async def request_inference_model_download() -> None:
         raise HTTPException(status_code=403, detail="local preview is read-only")
 
