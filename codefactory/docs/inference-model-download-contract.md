@@ -2,18 +2,23 @@
 
 ## Ownership and endpoints
 
-The LangGraph service owns each configured inference row's desired model configuration, durable PostgreSQL download queue and rollout outbox, and Prometheus metric projection. Instance IDs are `gpu`, `cpu`, or a lowercase DNS-style ID prefixed with `gpu-` or `cpu-` (for example, `gpu-secondary` or `cpu-secondary`). Each non-default ID must have a matching Deployment named `llama-cpp-server-{instance_id}` in namespace `inference`; the existing defaults map to `llama-cpp-server` and `llama-cpp-server-cpu`. Instance rows and matching workloads are provisioned outside the portal; this API edits existing rows and does not create Kubernetes workloads. The management portal is the public boundary: model URL/configuration reads, download submission, download status, and rollout status are limited to a signed GitHub Organization Owner session. Writes also require same-origin HTTPS. Portal-to-service endpoints require `INTERNAL_SERVICE_TOKEN`; no browser talks directly to LangGraph or PostgreSQL.
+The LangGraph service owns configured inference rows, durable PostgreSQL download, rollout, and workload outboxes, and Prometheus metric projection. Instance IDs are `gpu`, `cpu`, or a lowercase DNS-style ID prefixed with `gpu-` or `cpu-` (for example, `gpu-secondary` or `cpu-secondary`); the prefix selects the checked-in GPU or CPU profile. The management portal is the public control boundary: model, workload, download, and rollout views are limited to a signed GitHub Organization Owner session. Writes also require same-origin HTTPS. Portal-to-service endpoints require `INTERNAL_SERVICE_TOKEN`; no browser talks directly to LangGraph, PostgreSQL, or Kubernetes.
 
 The portal exposes:
 
-- `GET /api/inference-instances`: owner-only desired model filename and rollout status for every configured instance row.
+- `GET /api/inference-instances`: owner-only desired model, workload lifecycle, and model rollout status for every configured instance.
+- `POST /api/inference-instances`: creates a configuration and queues its Deployment and Service in the `inference` namespace. The ID prefix selects the existing CPU/GPU resource profile. `context_size` and `threads` are required: GPU profiles accept context sizes 512–16384 and 1–8 threads; CPU profiles accept 512–4096 and 1–4 threads. The reconciler applies these values to llama.cpp's `--ctx-size` and `--threads` arguments. Workload readiness is asynchronous and visible as `workload_status`.
+- `DELETE /api/inference-instances/{instance_id}`: deactivates the configuration and queues deletion of its controller-owned Deployment and Service. Deletion is visible as `workload_status=deleting` until Kubernetes confirms both resources are gone. Any instance can be deleted; its ID can be reused after deletion reaches `deleted`.
 - `GET /api/inference-models`: owner-only list of regular `.gguf` files currently present in shared model artifact storage. The list is the authoritative shared inventory, not configured filenames or download history.
 - `PUT /api/inference-instances/{instance_id}` applies a filename from the current inventory to that instance, including when re-requesting a rollout for the unchanged filename; a configured filename that has gone missing remains visible but cannot be applied until an available file is selected.
 - `POST /api/inference-model-downloads`: owner-only global enqueue; adds a verified GGUF to shared storage without selecting a CPU/GPU model or starting a rollout.
 - `GET /api/inference-model-downloads/{request_id}`: owner-only durable status. URL, SHA-256, transport exception text, and credentials are omitted.
 - Applying a downloaded catalog file is a separate per-instance `Apply model` action. It updates that instance's desired filename and queues a durable rollout; it is not part of download submission.
 - `GET /api/inference-instances` also returns separate `rollout_status`, `rollout_request_id`, and fixed `rollout_error` fields. Global download `ready` means the artifact is published; rollout `ready` means a rollout event was acknowledged.
+- `workload_status` is `provisioning`, `ready`, `deleting`, `failed`, or `deleted`; the error is fixed safe text. The inference controller retries failed operations from the durable queue. Model edits and deletion are rejected until the workload is ready. A deleted ID is reusable only after the reconciler confirms that its Deployment and Service are gone.
 - `GET /api/inference-metrics`: authenticated organization member view of CPU, RAM, GPU utilization, VRAM, and per-field availability state.
+
+The workflow provider's configured service URLs map to the `gpu` and `cpu` instance IDs. Create those IDs through the portal when those provider targets are needed; after a prior deletion, the same IDs become available again once workload removal is confirmed.
 
 Equivalent bearer-authenticated service routes are specified in `contracts/openapi/langgraph-service.json`; portal routes are in `contracts/openapi/management-portal.json`.
 
@@ -42,6 +47,14 @@ Required environment:
 Optional worker controls are `MODEL_DOWNLOAD_POLL_SECONDS` (default `5`) and `MODEL_DOWNLOAD_LEASE_SECONDS` (default `120`, minimum `30`). The worker uses the same LangGraph database role/configuration as the service. It atomically claims one request with `FOR UPDATE SKIP LOCKED`; a UUID lease prevents another worker from completing or failing that claim. Expired leases are reclaimed. One active request per GPU/CPU instance is allowed.
 
 The worker status contract is `queued -> downloading -> verifying -> ready` or `failed`. A lease-expired `downloading` or `verifying` request may be reclaimed as `downloading`. A failed request can be retried by submitting a new request after it is terminal. Only one active shared-storage request is allowed globally. Fixed public errors are used so URL parameters and transport exception details are never returned.
+
+## Durable workload lifecycle
+
+Migration `016_inference_workload_lifecycle.sql` adds the workload status and a leased ensure/delete outbox. Existing active configurations get an initial ensure event so current GPU/CPU workloads can be adopted by the controller. Migration `017_inference_runtime_options.sql` stores the bounded context and thread settings. Fresh installs no longer seed GPU or CPU instances; users create them through the portal. Creation queues provisioning; deletion first deactivates the row and queues removal. Acknowledgment records ready/deleted, or a fixed failure message and requeues the event. The portal polls lifecycle state while the operation is active.
+
+The portal and LangGraph remain in namespace `codefactory`; inference Services, Deployments, artifacts, and the reconciler remain in namespace `inference`. Kustomize publishes the existing CPU/GPU Deployment specs as read-only controller templates rather than managing live inference Services/Deployments. This prevents a later overlay apply from recreating a workload deleted through the portal. The reconciler alone has namespace-scoped Deployment and Service create/get/patch/delete permissions; it adopts only the two known default workloads and later requires its ownership labels before mutation or deletion. The portal and LangGraph service have no Kubernetes API permissions.
+
+LangGraph `/readyz` reports API process readiness so the management portal remains usable when no inference instance exists. The event worker separately checks the local model endpoint before claiming task events, so no model-backed work starts until the user-created workload is healthy.
 
 ## Durable rollout handoff
 
@@ -102,7 +115,7 @@ The status may also be `failed` or `superseded`. Repeating the same terminal ack
 
 The portal's rollout status is one of `not_requested`, `waiting_for_download`, `pending`, `rolling_out`, `ready`, or `failed`; it is not the download status. A download failure never generates a rollout event. Successful rollout status means the reconciler acknowledged the update, not that Kubernetes health checks or model inference were independently verified.
 
-The reconciler Role can get and patch Deployments in the `inference` namespace so it can target any configured instance Deployment by name. This namespace-scoped permission is broader than an explicit two-name allowlist; keep unrelated workloads out of this namespace. It does not need write access to the model PVC. The downloader remains without Kubernetes credentials or patch permissions.
+The reconciler Role can get/create/patch/delete Deployments and Services in the `inference` namespace so it can manage configured instances. Kubernetes RBAC cannot constrain create by resource name; the controller validates the instance ID, derives a fixed resource name, and requires ownership labels before mutation or deletion. Keep unrelated workloads out of this namespace. It does not need write access to the model PVC. The downloader remains without Kubernetes credentials or patch permissions.
 
 The worker process must have effective supplemental group GID `20000`. `MODEL_DIRECTORY` must be a real directory on the prepared model volume, group-owned by GID 20000, setgid, and group-writable. The worker refuses to publish unless its temporary file inherits GID 20000; final artifacts are mode `0640`. Temporary files are created inside that same directory, SHA-256 is checked before `os.replace`, and the directory is synced after publication. Inference containers continue to mount the model volume read-only. This contract does not change or deploy any Kubernetes workload.
 

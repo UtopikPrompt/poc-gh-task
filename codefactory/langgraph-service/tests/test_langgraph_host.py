@@ -1,7 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
-import json
 import sys
 from types import ModuleType, SimpleNamespace
 from uuid import UUID
@@ -168,7 +167,9 @@ def test_langgraph_host_uses_bundled_operations_factory_by_default(monkeypatch):
     )
 
 
-def test_langgraph_readiness_exposes_local_model_unavailability(monkeypatch):
+def test_langgraph_readiness_keeps_management_api_available_without_local_model(
+    monkeypatch,
+):
     _configure(monkeypatch, "unused_worker_module")
     monkeypatch.delenv("WORKFLOW_OPERATIONS_MODULE")
     app = host.create_app()
@@ -179,11 +180,7 @@ def test_langgraph_readiness_exposes_local_model_unavailability(monkeypatch):
 
     response = asyncio.run(endpoint())
 
-    assert response.status_code == 503
-    assert json.loads(response.body) == {
-        "status": "unavailable",
-        "dependency": "local_model",
-    }
+    assert response == {"status": "ok"}
 
 
 def test_private_management_api_is_authenticated_and_projects_safe_state(monkeypatch):
@@ -290,8 +287,6 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                 "rolling_out",
             }:
                 raise ValueError("inference model rollout is active")
-            if len(self.current) <= 1:
-                raise ValueError("at least one inference instance must remain")
             del self.current[instance_id]
 
         def update(self, config, *, updated_by):
@@ -308,6 +303,25 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                 updated_by,
             )
             return self.current[config.instance_id]
+
+        def claim_workload(self, *, lease_seconds):
+            assert lease_seconds == 120
+            return SimpleNamespace(
+                event_id=UUID("00000000-0000-0000-0000-000000000004"),
+                instance_id="gpu",
+                operation="ensure",
+                model_filename="model.gguf",
+                context_size=8192,
+                threads=3,
+                lease_token=UUID("00000000-0000-0000-0000-000000000005"),
+                attempts=1,
+            )
+
+        def acknowledge_workload(self, event_id, lease_token, *, succeeded):
+            assert event_id == UUID("00000000-0000-0000-0000-000000000004")
+            assert lease_token == UUID("00000000-0000-0000-0000-000000000005")
+            assert succeeded is True
+            return "succeeded"
 
     class ModelDownloadStore:
         request = SimpleNamespace(
@@ -434,6 +448,8 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                 json={
                     "instance_id": "gpu-extra",
                     "model_filename": "model.gguf",
+                    "context_size": 8192,
+                    "threads": 3,
                     "created_by": "owner-login",
                 },
             )
@@ -443,6 +459,8 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                 json={
                     "instance_id": "gpu-extra",
                     "model_filename": "model.gguf",
+                    "context_size": 8192,
+                    "threads": 3,
                     "created_by": "owner-login",
                 },
             )
@@ -524,6 +542,23 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
                     "outcome": "succeeded",
                 },
             )
+            unauthenticated_workload_claim = client.post(
+                "/internal/reconciler/inference-workloads/claim",
+                json={"lease_seconds": 120},
+            )
+            workload_claim = client.post(
+                "/internal/reconciler/inference-workloads/claim",
+                headers=reconciler_headers,
+                json={"lease_seconds": 120},
+            )
+            workload_ack = client.post(
+                "/internal/reconciler/inference-workloads/00000000-0000-0000-0000-000000000004/ack",
+                headers=reconciler_headers,
+                json={
+                    "lease_token": "00000000-0000-0000-0000-000000000005",
+                    "outcome": "succeeded",
+                },
+            )
             metrics = client.get(
                 "/internal/management/inference-metrics", headers=headers
             )
@@ -599,7 +634,11 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
     assert created_instance.status_code == 201
     assert created_instance.json()["config"]["instance_id"] == "gpu-extra"
     assert deleted_instance.status_code == 200
-    assert deleted_instance.json() == {"deleted": True, "instance_id": "gpu-extra"}
+    assert deleted_instance.json() == {
+        "deletion_queued": True,
+        "instance_id": "gpu-extra",
+        "workload_status": "deleting",
+    }
     assert active_instance_delete.status_code == 409
     assert missing_instance_delete.status_code == 404
     assert unauthenticated_models.status_code == 401
@@ -644,6 +683,11 @@ def test_private_management_api_is_authenticated_and_projects_safe_state(monkeyp
     assert rollout_claim.json()["event"]["idempotency_key"].startswith("gpu:1:")
     assert rollout_ack.status_code == 200
     assert rollout_ack.json()["status"] == "succeeded"
+    assert unauthenticated_workload_claim.status_code == 401
+    assert workload_claim.status_code == 200
+    assert workload_claim.json()["event"]["operation"] == "ensure"
+    assert workload_ack.status_code == 200, workload_ack.text
+    assert workload_ack.json()["status"] == "succeeded"
     assert metrics.status_code == 200
     assert [item["instance_id"] for item in metrics.json()["instances"]] == [
         "gpu",

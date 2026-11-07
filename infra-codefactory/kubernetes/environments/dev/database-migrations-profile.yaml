@@ -9,4 +9,4 @@ spec:
       - name: migrate
         env:
         - name: MIGRATION_PROFILE
-          value: inference-015
+          value: inference-017

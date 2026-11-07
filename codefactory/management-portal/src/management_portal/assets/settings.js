@@ -17,6 +17,8 @@ const inferenceInstanceTemplate = document.getElementById('inference-instance-te
 const inferenceInstanceCreateForm = document.getElementById('inference-instance-create-form');
 const newInferenceInstanceId = document.getElementById('new-inference-instance-id');
 const newInferenceModel = document.getElementById('new-inference-model');
+const newInferenceContextSize = document.getElementById('new-inference-context-size');
+const newInferenceThreads = document.getElementById('new-inference-threads');
 const createInferenceInstanceButton = document.getElementById('create-inference-instance');
 const rosterMessage = document.getElementById('roster-message');
 const rosterAudit = document.getElementById('roster-audit');
@@ -40,10 +42,10 @@ let savedTimeout = null;
 let canEditInference = false;
 let availableModelFilenames = [];
 let modelInventoryLoaded = false;
-let activeInferenceInstanceCount = 0;
 let toastTimeout = null;
 let modelDownloadFilenameManuallyEdited = false;
 const savedInferenceModels = {};
+let createInferenceProfile = 'cpu';
 let sharedDownload = { requestId: null, status: '', publicError: null };
 let rosterDraft = null;
 let rosterDirty = false;
@@ -122,47 +124,70 @@ function updateInferenceSaveState(form) {
     const input = form.elements.model_filename;
     const status = form.dataset.rolloutStatus || 'not_requested';
     const active = ['pending', 'rolling_out'].includes(status);
+    const workloadStatus = form.dataset.workloadStatus || 'provisioning';
+    const workloadReady = workloadStatus === 'ready';
     const unchanged = input.value === savedInferenceModels[instance];
     const button = form.querySelector('button[type="submit"]');
     const help = form.querySelector('.apply-model-help');
     button.disabled = !canEditInference || (
-        active || !modelInventoryLoaded || !availableModelFilenames.includes(input.value)
+        !workloadReady || active || !modelInventoryLoaded || !availableModelFilenames.includes(input.value)
         || (unchanged && status === 'ready')
     );
-    help.textContent = active
-        ? 'A model rollout is already in progress.'
-        : !canEditInference
-            ? 'Organization owner access is required to apply models.'
-            : !modelInventoryLoaded
-                ? 'Model availability is unavailable; reload the catalog to enable Apply model.'
-                : !availableModelFilenames.includes(input.value)
-                    ? 'Select an available model to enable Apply model.'
-                    : unchanged && status === 'ready'
-                        ? 'This filename is already selected. Choose a different available model to enable Apply model.'
-                        : unchanged && status === 'failed'
-                            ? 'The previous rollout failed. Apply model to retry.'
-                            : unchanged && status === 'not_requested'
-                                ? 'No rollout has been requested for this selection. Apply model to request one.'
-                                : '';
+    help.textContent = !workloadReady
+        ? `Inference workload ${workloadStatus.replaceAll('_', ' ')}; model changes are unavailable.`
+        : active
+            ? 'A model rollout is already in progress.'
+            : !canEditInference
+                ? 'Organization owner access is required to apply models.'
+                : !modelInventoryLoaded
+                    ? 'Model availability is unavailable; reload the catalog to enable Apply model.'
+                    : !availableModelFilenames.includes(input.value)
+                        ? 'Select an available model to enable Apply model.'
+                        : unchanged && status === 'ready'
+                            ? 'This filename is already selected. Choose a different available model to enable Apply model.'
+                            : unchanged && status === 'failed'
+                                ? 'The previous rollout failed. Apply model to retry.'
+                                : unchanged && status === 'not_requested'
+                                    ? 'No rollout has been requested for this selection. Apply model to request one.'
+                                    : '';
 }
 
 function updateInferenceDeleteState(form) {
     const active = ['pending', 'rolling_out'].includes(form.dataset.rolloutStatus);
+    const workloadStatus = form.dataset.workloadStatus || 'provisioning';
     const button = form.querySelector('.delete-inference-instance');
-    button.disabled = !canEditInference || active || activeInferenceInstanceCount <= 1;
+    button.disabled = !canEditInference || active || workloadStatus !== 'ready';
     button.title = active
         ? 'Wait for the active model rollout to finish.'
-        : activeInferenceInstanceCount <= 1
-            ? 'Keep at least one inference instance configuration.'
-            : 'Delete configuration';
+        : workloadStatus !== 'ready'
+            ? `Wait for workload status: ${workloadStatus}.`
+            : 'Delete workload';
 }
 
 function updateInferenceCreateState() {
     const instanceId = newInferenceInstanceId.value;
     const validId = /^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$/.test(instanceId);
     const availableModel = availableModelFilenames.includes(newInferenceModel.value);
+    const profile = instanceId.startsWith('gpu') ? 'gpu' : 'cpu';
+    const contextSize = Number(newInferenceContextSize.value);
+    const threads = Number(newInferenceThreads.value);
+    const validRuntimeOptions = Number.isInteger(contextSize) && contextSize >= 512
+        && contextSize <= (profile === 'cpu' ? 4096 : 16384)
+        && Number.isInteger(threads) && threads >= 1
+        && threads <= (profile === 'cpu' ? 4 : 8);
     createInferenceInstanceButton.disabled = !canEditInference || !modelInventoryLoaded
-        || !validId || Object.hasOwn(savedInferenceModels, instanceId) || !availableModel;
+        || !validId || Object.hasOwn(savedInferenceModels, instanceId) || !availableModel
+        || !validRuntimeOptions;
+}
+
+function updateInferenceCreateProfile() {
+    const profile = newInferenceInstanceId.value.startsWith('gpu') ? 'gpu' : 'cpu';
+    if (profile !== createInferenceProfile) {
+        newInferenceContextSize.value = profile === 'gpu' ? '16384' : '1024';
+        newInferenceThreads.value = profile === 'gpu' ? '8' : '2';
+        createInferenceProfile = profile;
+    }
+    updateInferenceCreateState();
 }
 
 function updateModelDownloadButton() {
@@ -224,6 +249,17 @@ function showRolloutStatus(form, status, error = null) {
     updateInferenceSaveState(form);
     updateInferenceDeleteState(form);
     updateModelDownloadButton();
+}
+
+function showWorkloadStatus(form, status, error = null) {
+    const element = form.querySelector('.workload-status');
+    form.dataset.workloadStatus = status || 'provisioning';
+    element.dataset.state = status === 'failed' ? 'error'
+        : status === 'ready' ? 'success'
+            : ['provisioning', 'deleting'].includes(status) ? 'loading' : 'info';
+    element.textContent = error || `Inference workload ${form.dataset.workloadStatus.replaceAll('_', ' ')}.`;
+    updateInferenceSaveState(form);
+    updateInferenceDeleteState(form);
 }
 
 function createInferenceInstanceForm(instanceId) {
@@ -310,6 +346,8 @@ function renderModelCatalog() {
     modelDownloadFilename.disabled = !canEditInference;
     modelDownloadUrl.disabled = !canEditInference;
     newInferenceInstanceId.disabled = !canEditInference;
+    newInferenceContextSize.disabled = !canEditInference;
+    newInferenceThreads.disabled = !canEditInference;
     newInferenceModel.replaceChildren();
     for (const filename of availableModelFilenames) {
         const option = document.createElement('option');
@@ -347,7 +385,6 @@ async function loadInferenceInstances({ quiet = false } = {}) {
         if (!response.ok) throw new Error('unavailable');
         const record = await response.json();
         canEditInference = record.can_edit === true && record.preview !== true;
-        activeInferenceInstanceCount = record.instances.length;
         renderModelCatalog();
         syncInferenceInstanceForms(record.instances);
         for (const instance of record.instances) {
@@ -356,7 +393,8 @@ async function loadInferenceInstances({ quiet = false } = {}) {
             savedInferenceModels[instance.config.instance_id] = instance.config.model_filename;
             renderModelSelection(form, instance.config.model_filename);
             const rolloutActive = ['pending', 'rolling_out'].includes(instance.config.rollout_status);
-            input.disabled = !canEditInference || rolloutActive || !modelInventoryLoaded;
+            const workloadReady = instance.config.workload_status === 'ready';
+            input.disabled = !canEditInference || !workloadReady || rolloutActive || !modelInventoryLoaded;
             form.querySelector('.audit-line').textContent = instance.version
                 ? `Version ${instance.version} | Updated ${instance.updated_at} by ${instance.updated_by}`
                 : 'Configured default; no saved override.';
@@ -364,6 +402,11 @@ async function loadInferenceInstances({ quiet = false } = {}) {
                 form,
                 instance.config.rollout_status,
                 instance.config.rollout_error,
+            );
+            showWorkloadStatus(
+                form,
+                instance.config.workload_status,
+                instance.config.workload_error,
             );
             updateInferenceSaveState(form);
             updateInferenceDeleteState(form);
@@ -385,6 +428,8 @@ async function loadInferenceInstances({ quiet = false } = {}) {
         modelDownloadFilename.disabled = true;
         modelDownloadUrl.disabled = true;
         newInferenceInstanceId.disabled = true;
+        newInferenceContextSize.disabled = true;
+        newInferenceThreads.disabled = true;
         newInferenceModel.disabled = true;
         createInferenceInstanceButton.disabled = true;
         updateModelDownloadButton();
@@ -396,7 +441,7 @@ async function createInferenceInstance(event) {
     event.preventDefault();
     if (!inferenceInstanceCreateForm.reportValidity()) return;
     createInferenceInstanceButton.disabled = true;
-    setStatus(inferenceMessage, 'Creating inference configuration...', 'loading');
+    setStatus(inferenceMessage, 'Creating inference workload...', 'loading');
     try {
         const response = await fetch('/api/inference-instances', {
             method: 'POST',
@@ -404,14 +449,17 @@ async function createInferenceInstance(event) {
             body: JSON.stringify({
                 instance_id: newInferenceInstanceId.value,
                 model_filename: newInferenceModel.value,
+                context_size: Number(newInferenceContextSize.value),
+                threads: Number(newInferenceThreads.value),
             }),
         });
         if (response.status === 409) throw new Error('conflict');
         if (!response.ok) throw new Error('unavailable');
         const record = await response.json();
-        setStatus(inferenceMessage, `${record.config.instance_id} configuration created.`, 'success');
-        showToast(`${record.config.instance_id} configuration created.`, 'success');
+        setStatus(inferenceMessage, `${record.config.instance_id} workload provisioning started.`, 'success');
+        showToast(`${record.config.instance_id} workload provisioning started.`, 'success');
         newInferenceInstanceId.value = '';
+        updateInferenceCreateProfile();
         await loadInferenceInstances({ quiet: true });
         await loadInferenceMetrics();
     } catch (error) {
@@ -427,8 +475,8 @@ async function createInferenceInstance(event) {
 }
 
 async function deleteInferenceInstance(instanceId) {
-    if (!window.confirm(`Delete the saved configuration for ${instanceId}? Historical references will remain.`)) return;
-    setStatus(inferenceMessage, `Deleting ${instanceId} configuration...`, 'loading');
+    if (!window.confirm(`Delete the inference workload and saved configuration for ${instanceId}? Historical references will remain.`)) return;
+    setStatus(inferenceMessage, `Deleting ${instanceId} workload...`, 'loading');
     try {
         const response = await fetch(`/api/inference-instances/${instanceId}`, {
             method: 'DELETE',
@@ -437,17 +485,17 @@ async function deleteInferenceInstance(instanceId) {
         if (response.status === 409) throw new Error('conflict');
         if (!response.ok) throw new Error('unavailable');
         delete savedInferenceModels[instanceId];
-        setStatus(inferenceMessage, `${instanceId} configuration deleted.`, 'success');
-        showToast(`${instanceId} configuration deleted.`, 'success');
+        setStatus(inferenceMessage, `${instanceId} workload deletion queued.`, 'success');
+        showToast(`${instanceId} workload deletion queued.`, 'success');
         await loadInferenceInstances({ quiet: true });
         await loadInferenceMetrics();
     } catch (error) {
         const conflict = error.message === 'conflict';
         setStatus(inferenceMessage, conflict
-            ? 'This configuration cannot be deleted while active or when it is the last one.'
+            ? 'This configuration cannot be deleted while active.'
             : 'Inference configuration could not be deleted.', 'error');
         showToast(conflict
-            ? 'This configuration cannot be deleted while active or when it is the last one.'
+            ? 'This configuration cannot be deleted while active.'
             : 'Inference configuration could not be deleted.', 'error');
     }
 }
@@ -551,7 +599,11 @@ async function pollInferenceDownloads() {
     }
     const rolloutActive = [...document.querySelectorAll('.inference-instance')].some((form) =>
         ['pending', 'rolling_out'].includes(form.dataset.rolloutStatus));
-    if (downloadBecameTerminal || rolloutActive) await loadInferenceInstances({ quiet: true });
+    const workloadActive = [...document.querySelectorAll('.inference-instance')].some((form) =>
+        ['provisioning', 'deleting', 'failed'].includes(form.dataset.workloadStatus));
+    if (downloadBecameTerminal || rolloutActive || workloadActive) {
+        await loadInferenceInstances({ quiet: true });
+    }
 }
 
 function formatMetric(metric, formatter) {
@@ -947,25 +999,32 @@ async function saveAgentRoster(event) {
     }
 }
 
-timeoutInput.addEventListener('input', () => {
-    updateConfigSaveState();
-    if (Number(timeoutInput.value) !== savedTimeout) setStatus(configMessage, 'Unsaved changes.', 'dirty');
-});
-document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfig);
-inferenceInstanceCreateForm.addEventListener('submit', createInferenceInstance);
-newInferenceInstanceId.addEventListener('input', updateInferenceCreateState);
-newInferenceModel.addEventListener('change', updateInferenceCreateState);
-modelDownloadForm.addEventListener('submit', requestInferenceModelDownload);
-modelDownloadFilename.addEventListener('input', () => {
-    modelDownloadFilenameManuallyEdited = true;
-    updateModelDownloadButton();
-});
-modelDownloadUrl.addEventListener('input', suggestModelFilenameFromUrl);
-rosterForm.addEventListener('submit', saveAgentRoster);
-addProfileButton.addEventListener('click', addProfile);
-loadAgentConfig();
-loadInferenceInstances();
-loadInferenceMetrics();
-loadAgentRoster();
-window.setInterval(pollInferenceDownloads, 3000);
-window.setInterval(loadInferenceMetrics, 15000);
+if (timeoutInput) {
+    timeoutInput.addEventListener('input', () => {
+        updateConfigSaveState();
+        if (Number(timeoutInput.value) !== savedTimeout) setStatus(configMessage, 'Unsaved changes.', 'dirty');
+    });
+    document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfig);
+    rosterForm.addEventListener('submit', saveAgentRoster);
+    addProfileButton.addEventListener('click', addProfile);
+    loadAgentConfig();
+    loadAgentRoster();
+}
+
+if (inferenceInstanceCreateForm) {
+    inferenceInstanceCreateForm.addEventListener('submit', createInferenceInstance);
+    newInferenceInstanceId.addEventListener('input', updateInferenceCreateProfile);
+    newInferenceModel.addEventListener('change', updateInferenceCreateState);
+    newInferenceContextSize.addEventListener('input', updateInferenceCreateState);
+    newInferenceThreads.addEventListener('input', updateInferenceCreateState);
+    modelDownloadForm.addEventListener('submit', requestInferenceModelDownload);
+    modelDownloadFilename.addEventListener('input', () => {
+        modelDownloadFilenameManuallyEdited = true;
+        updateModelDownloadButton();
+    });
+    modelDownloadUrl.addEventListener('input', suggestModelFilenameFromUrl);
+    loadInferenceInstances();
+    loadInferenceMetrics();
+    window.setInterval(pollInferenceDownloads, 3000);
+    window.setInterval(loadInferenceMetrics, 15000);
+}

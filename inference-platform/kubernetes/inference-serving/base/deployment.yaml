@@ -7,6 +7,8 @@ metadata:
     app.kubernetes.io/part-of: inference-serving
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: llama-cpp-server
@@ -17,6 +19,18 @@ spec:
         app.kubernetes.io/part-of: inference-serving
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        supplementalGroups:
+        - 20000
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - k8s-node01
       containers:
       - name: llama-server
         image: ghcr.io/ggml-org/llama.cpp@sha256:c1d664830580e1651c1cc8d3bbc161af474800a56a83226e6e22f94bb8ba1c59
@@ -27,12 +41,31 @@ spec:
         - /models/model.gguf
         - --n-gpu-layers
         - all
+        - --device
+        - CUDA0,CUDA1
+        - --split-mode
+        - layer
+        - --tensor-split
+        - 1,1
         - --ctx-size
-        - "2048"
+        - "16384"
         - --host
         - 0.0.0.0
         - --port
         - "8080"
+        resources:
+          requests:
+            cpu: "8"
+            memory: 56Gi
+            nvidia.com/gpu: "2"
+          limits:
+            cpu: "8"
+            memory: 56Gi
+            nvidia.com/gpu: "2"
+        volumeMounts:
+        - name: model-artifacts
+          mountPath: /models
+          readOnly: true
         ports:
         - name: http
           containerPort: 8080
@@ -58,3 +91,7 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 2
           failureThreshold: 6
+      volumes:
+      - name: model-artifacts
+        persistentVolumeClaim:
+          claimName: inference-model-artifacts

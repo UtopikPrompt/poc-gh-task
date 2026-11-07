@@ -9,11 +9,6 @@ CREATE TABLE langgraph_service.inference_instance_config (
            (version > 0 AND updated_at IS NOT NULL AND updated_by IS NOT NULL))
 );
 
-INSERT INTO langgraph_service.inference_instance_config (instance_id, model_filename)
-VALUES
-    ('gpu', 'qwen2.5-32b-instruct-q4_k_m.gguf'),
-    ('cpu', 'qwen2.5-0.5b-instruct-q4_k_m.gguf');
-
 ALTER TABLE langgraph_service.agent_config DROP COLUMN model_profile;
 
 ALTER TABLE langgraph_service.inference_instance_config

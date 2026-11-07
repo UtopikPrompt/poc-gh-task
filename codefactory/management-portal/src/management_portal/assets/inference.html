@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Inference configuration</title>
+    <link rel="stylesheet" href="/management-portal/assets/portal.css">
+    <script src="/management-portal/assets/settings.js" defer></script>
+</head>
+
+<body class="settings-page">
+    <main class="settings-shell">
+        <header>
+            <div class="header-top">
+                <h1>Inference configuration</h1>
+                <div class="header-actions">
+                    <form action="/auth/logout" method="post"><button type="submit">Sign out</button></form>
+                </div>
+            </div>
+            <nav class="primary-nav" aria-label="Primary navigation">
+                <a href="/">Dashboard</a>
+                <a href="/settings">LangGraph</a>
+                <a href="/inference" aria-current="page">Inference</a>
+            </nav>
+        </header>
+        <section class="settings-section inference-section" aria-labelledby="inference-heading">
+            <div class="roster-heading">
+                <h2 id="inference-heading">Inference instances</h2>
+                <div class="roster-status">
+                    <p id="inference-message" role="status" aria-live="polite" data-state="loading">Loading models...
+                    </p>
+                </div>
+            </div>
+            <form id="model-download-form" class="shared-model-download">
+                <h3>Download to shared storage</h3>
+                <p id="model-catalog-status" class="audit-line" role="status" aria-live="polite">Loading shared
+                    models...</p>
+                <div class="shared-download-fields">
+                    <div>
+                        <label for="model-download-url">Hugging Face model file URL</label>
+                        <input id="model-download-url" name="model_url" type="url" required maxlength="4096"
+                            autocomplete="off" aria-describedby="model-download-help" disabled>
+                        <p id="model-download-help" class="audit-line">The verified GGUF is added to shared storage.
+                            Assign it to an instance separately with Apply model.</p>
+                    </div>
+                    <div>
+                        <label for="model-download-filename">Save as</label>
+                        <input id="model-download-filename" name="model_filename" type="text" required
+                            pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf" maxlength="204" list="available-models"
+                            autocomplete="off" disabled>
+                        <datalist id="available-models"></datalist>
+                    </div>
+                </div>
+                <div class="config-controls download-controls">
+                    <button class="download-model" type="submit" disabled>Download</button>
+                    <span id="download-status" class="download-status" role="status" aria-live="polite">No download
+                        requested.</span>
+                </div>
+            </form>
+            <form id="inference-instance-create-form" class="inference-instance-create">
+                <div>
+                    <label for="new-inference-instance-id">Instance ID</label>
+                    <input id="new-inference-instance-id" name="instance_id" type="text" required
+                        pattern="(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?" maxlength="62"
+                        autocomplete="off" placeholder="gpu-secondary" disabled>
+                </div>
+                <div>
+                    <label for="new-inference-model">Initial model</label>
+                    <select id="new-inference-model" name="model_filename" required disabled></select>
+                </div>
+                <div>
+                    <label for="new-inference-context-size">Context size (tokens)</label>
+                    <input id="new-inference-context-size" name="context_size" type="number" min="512" max="16384"
+                        step="1" value="1024" required disabled>
+                </div>
+                <div>
+                    <label for="new-inference-threads">CPU threads</label>
+                    <input id="new-inference-threads" name="threads" type="number" min="1" max="8" step="1" value="2"
+                        required disabled>
+                </div>
+                <button id="create-inference-instance" type="submit" disabled>Create inference workload</button>
+                <p class="audit-line">The ID prefix selects the GPU or CPU workload profile. CPU context is limited
+                    to 4096 tokens; provisioning and readiness are reported below.</p>
+            </form>
+            <div id="inference-instance-list" class="inference-instance-list"></div>
+            <template id="inference-instance-template">
+                <form class="inference-instance" data-instance="">
+                    <div class="inference-instance-identity">
+                        <h3></h3>
+                        <p class="audit-line"></p>
+                    </div>
+                    <div class="inference-model-config">
+                        <label for="model-filename">Selected GGUF filename</label>
+                        <div class="config-controls">
+                            <select id="model-filename" class="instance-model-input" name="model_filename" required
+                                size="1" disabled></select>
+                            <button type="submit" disabled>Apply model</button>
+                        </div>
+                        <p class="model-selection-status audit-line" role="status" aria-live="polite"></p>
+                        <p class="apply-model-help audit-line" role="status" aria-live="polite"></p>
+                    </div>
+                    <div class="inference-instance-status">
+                        <p class="workload-status" role="status" aria-live="polite">Inference workload status
+                            unavailable.</p>
+                        <p class="rollout-status" role="status" aria-live="polite">Model rollout not requested.</p>
+                    </div>
+                    <div class="inference-instance-actions">
+                        <button class="delete-inference-instance" type="button" disabled>Delete workload</button>
+                    </div>
+                </form>
+            </template>
+            <h3>Inference metrics</h3>
+            <div class="table-wrap inference-metrics-wrap">
+                <table aria-label="Per-instance inference metrics">
+                    <thead>
+                        <tr>
+                            <th scope="col">Instance</th>
+                            <th scope="col">CPU / GPU</th>
+                            <th scope="col">RAM / VRAM</th>
+                            <th scope="col">Sampled</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inference-metrics-body">
+                        <tr>
+                            <td colspan="4">Metrics unavailable.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p id="inference-metrics-message" class="audit-line" role="status" aria-live="polite"></p>
+        </section>
+    </main>
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true" hidden></div>
+</body>
+
+</html>

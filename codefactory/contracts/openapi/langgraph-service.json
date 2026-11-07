@@ -177,7 +177,7 @@
             },
             "post": {
                 "operationId": "createInferenceInstance",
-                "description": "Creates a saved instance configuration using an available shared GGUF filename; it does not provision a Deployment or start a model rollout.",
+                "description": "Creates an instance configuration and durably queues inference Deployment and Service provisioning in the inference namespace using the CPU or GPU profile selected by instance ID prefix.",
                 "security": [
                     {
                         "bearerAuth": []
@@ -297,7 +297,7 @@
             },
             "delete": {
                 "operationId": "deleteInferenceInstance",
-                "description": "Deactivates an instance configuration while retaining historical references. Active downloads, active rollouts, and deletion of the final active configuration are rejected.",
+                "description": "Deactivates an instance configuration and durably queues deletion of its controller-owned Deployment and Service. Active downloads, active rollouts, an unready workload, and deletion of the final active configuration are rejected.",
                 "security": [
                     {
                         "bearerAuth": []
@@ -316,7 +316,7 @@
                 ],
                 "responses": {
                     "200": {
-                        "description": "Instance configuration deactivated"
+                        "description": "Inference workload deletion queued"
                     },
                     "401": {
                         "description": "Internal service authentication required"
@@ -515,6 +515,101 @@
                     },
                     "503": {
                         "description": "Rollout status unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/reconciler/inference-workloads/claim": {
+            "post": {
+                "operationId": "claimInferenceWorkload",
+                "description": "Claims a durable CPU/GPU workload ensure or delete operation. Uses the dedicated MODEL_RECONCILER_TOKEN and only the inference-namespace reconciler has Kubernetes write permissions.",
+                "security": [
+                    {
+                        "reconcilerBearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/InferenceWorkloadClaimRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Claimed workload event or no work",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InferenceWorkloadClaimResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Reconciler authentication required"
+                    },
+                    "503": {
+                        "description": "Workload queue unavailable"
+                    }
+                }
+            }
+        },
+        "/internal/reconciler/inference-workloads/{event_id}/ack": {
+            "post": {
+                "operationId": "acknowledgeInferenceWorkload",
+                "description": "Acknowledges ready/deleted state or records a fixed safe failure and retries the event. Lease tokens are required and successful acknowledgments are idempotent for the same token.",
+                "security": [
+                    {
+                        "reconcilerBearerAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "event_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/InferenceWorkloadAcknowledgeRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Workload status recorded",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InferenceWorkloadAcknowledgeResponse"
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Reconciler authentication required"
+                    },
+                    "404": {
+                        "description": "Workload event not found"
+                    },
+                    "409": {
+                        "description": "Workload lease is stale or expired"
+                    },
+                    "503": {
+                        "description": "Workload status unavailable"
                     }
                 }
             }
@@ -832,6 +927,8 @@
                 "required": [
                     "instance_id",
                     "model_filename",
+                    "context_size",
+                    "threads",
                     "created_by"
                 ],
                 "properties": {
@@ -841,6 +938,16 @@
                     },
                     "model_filename": {
                         "$ref": "#/components/schemas/InferenceInstanceUpdate/properties/model_filename"
+                    },
+                    "context_size": {
+                        "type": "integer",
+                        "minimum": 512,
+                        "maximum": 16384
+                    },
+                    "threads": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8
                     },
                     "created_by": {
                         "type": "string",
@@ -864,9 +971,13 @@
                         "required": [
                             "instance_id",
                             "model_filename",
+                            "context_size",
+                            "threads",
                             "rollout_status",
                             "rollout_request_id",
-                            "rollout_error"
+                            "rollout_error",
+                            "workload_status",
+                            "workload_error"
                         ],
                         "properties": {
                             "instance_id": {
@@ -875,6 +986,16 @@
                             },
                             "model_filename": {
                                 "$ref": "#/components/schemas/InferenceInstanceUpdate/properties/model_filename"
+                            },
+                            "context_size": {
+                                "type": "integer",
+                                "minimum": 512,
+                                "maximum": 16384
+                            },
+                            "threads": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 8
                             },
                             "rollout_status": {
                                 "$ref": "#/components/schemas/RolloutStatus"
@@ -887,6 +1008,16 @@
                                 "format": "uuid"
                             },
                             "rollout_error": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 200
+                            },
+                            "workload_status": {
+                                "$ref": "#/components/schemas/InferenceWorkloadStatus"
+                            },
+                            "workload_error": {
                                 "type": [
                                     "string",
                                     "null"
@@ -966,6 +1097,141 @@
                     "ready",
                     "failed"
                 ]
+            },
+            "InferenceWorkloadStatus": {
+                "type": "string",
+                "enum": [
+                    "provisioning",
+                    "ready",
+                    "deleting",
+                    "failed",
+                    "deleted"
+                ]
+            },
+            "InferenceWorkloadClaimRequest": {
+                "type": "object",
+                "properties": {
+                    "lease_seconds": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 900,
+                        "default": 120
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceWorkloadEvent": {
+                "type": "object",
+                "required": [
+                    "event_id",
+                    "instance_id",
+                    "operation",
+                    "model_filename",
+                    "context_size",
+                    "threads",
+                    "lease_token",
+                    "attempts"
+                ],
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "instance_id": {
+                        "type": "string",
+                        "pattern": "^(?:gpu|cpu)(?:-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?)?$"
+                    },
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "ensure",
+                            "delete"
+                        ]
+                    },
+                    "model_filename": {
+                        "$ref": "#/components/schemas/InferenceInstanceUpdate/properties/model_filename"
+                    },
+                    "context_size": {
+                        "type": "integer",
+                        "minimum": 512,
+                        "maximum": 16384
+                    },
+                    "threads": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8
+                    },
+                    "lease_token": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "attempts": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceWorkloadClaimResponse": {
+                "type": "object",
+                "required": [
+                    "event"
+                ],
+                "properties": {
+                    "event": {
+                        "oneOf": [
+                            {
+                                "$ref": "#/components/schemas/InferenceWorkloadEvent"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceWorkloadAcknowledgeRequest": {
+                "type": "object",
+                "required": [
+                    "lease_token",
+                    "outcome"
+                ],
+                "properties": {
+                    "lease_token": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "succeeded",
+                            "failed"
+                        ]
+                    }
+                },
+                "additionalProperties": false
+            },
+            "InferenceWorkloadAcknowledgeResponse": {
+                "type": "object",
+                "required": [
+                    "event_id",
+                    "status"
+                ],
+                "properties": {
+                    "event_id": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "succeeded",
+                            "retrying"
+                        ]
+                    }
+                },
+                "additionalProperties": false
             },
             "ModelRolloutClaimRequest": {
                 "type": "object",

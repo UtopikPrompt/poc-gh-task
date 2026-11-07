@@ -16,7 +16,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from langgraph_service.agent_config import AgentConfig
@@ -41,6 +41,7 @@ from langgraph_service.storage.agent_roster_store import (
 from langgraph_service.storage.config_store import PostgresAgentConfigStore
 from langgraph_service.storage.inference_config_store import (
     PostgresInferenceInstanceConfigStore,
+    WORKLOAD_FAILURE,
 )
 from langgraph_service.storage.model_download_store import (
     ModelDownloadRequest,
@@ -105,12 +106,22 @@ class InferenceInstanceCreate(BaseModel):
         max_length=205,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$",
     )
+    context_size: int = Field(strict=True, ge=512, le=16384)
+    threads: int = Field(strict=True, ge=1, le=8)
     created_by: str = Field(
         strict=True,
         min_length=1,
         max_length=39,
         pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$",
     )
+
+    @model_validator(mode="after")
+    def validate_profile_limits(self) -> "InferenceInstanceCreate":
+        if self.instance_id.startswith("cpu") and self.context_size > 4096:
+            raise ValueError("context_size exceeds the CPU instance profile limit")
+        if self.instance_id.startswith("cpu") and self.threads > 4:
+            raise ValueError("threads exceeds the CPU instance profile limit")
+        return self
 
 
 class InferenceInstanceRecord(BaseModel):
@@ -191,6 +202,45 @@ class ModelRolloutAcknowledgeResponse(BaseModel):
     status: Literal["succeeded", "failed", "superseded"]
 
 
+class InferenceWorkloadClaimPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    lease_seconds: int = Field(default=120, ge=30, le=900)
+
+
+class InferenceWorkloadEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID
+    instance_id: InferenceInstance
+    operation: Literal["ensure", "delete"]
+    model_filename: str
+    context_size: int = Field(ge=512, le=16384)
+    threads: int = Field(ge=1, le=8)
+    lease_token: UUID
+    attempts: int
+
+
+class InferenceWorkloadClaimResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event: InferenceWorkloadEvent | None
+
+
+class InferenceWorkloadAcknowledgePayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lease_token: UUID
+    outcome: Literal["succeeded", "failed"]
+
+
+class InferenceWorkloadAcknowledgeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: UUID
+    status: Literal["succeeded", "retrying"]
+
+
 class MetricValue(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -223,6 +273,11 @@ def _inference_instance_response(snapshot) -> dict[str, object]:
         and config["rollout_error"] != ROLLOUT_FAILURE
     ):
         config["rollout_error"] = ROLLOUT_FAILURE
+    if (
+        config["workload_error"] is not None
+        and config["workload_error"] != WORKLOAD_FAILURE
+    ):
+        config["workload_error"] = WORKLOAD_FAILURE
     return {
         "config": config,
         "version": snapshot.version,
@@ -421,9 +476,6 @@ def create_app() -> FastAPI:
 
         return await request_validation_exception_handler(request, _error)
 
-    app.state.local_model_required = (
-        module_name == "langgraph_service.workflow.workflow_operations"
-    )
     app.state.proposal_provider = None
 
     def authenticate_internal(authorization: str = Header(default="")) -> None:
@@ -507,6 +559,8 @@ def create_app() -> FastAPI:
         config = InferenceInstanceConfig(
             instance_id=payload.instance_id,
             model_filename=payload.model_filename,
+            context_size=payload.context_size,
+            threads=payload.threads,
         )
         try:
             snapshot = await run_in_threadpool(
@@ -576,13 +630,18 @@ def create_app() -> FastAPI:
         except ValueError as error:
             active = str(error) == "inference model download is active"
             rollout_active = str(error) == "inference model rollout is active"
+            workload_unready = str(error) == "inference workload is not ready"
             raise HTTPException(
-                status_code=409 if active or rollout_active else 404,
+                status_code=409
+                if active or rollout_active or workload_unready
+                else 404,
                 detail=(
                     "inference model download is active"
                     if active
                     else "inference model rollout is active"
                     if rollout_active
+                    else "inference workload is not ready"
+                    if workload_unready
                     else "inference instance not found"
                 ),
             ) from error
@@ -606,7 +665,7 @@ def create_app() -> FastAPI:
             if detail in {
                 "inference model download is active",
                 "inference model rollout is active",
-                "at least one inference instance must remain",
+                "inference workload is not ready",
             }:
                 raise HTTPException(status_code=409, detail=detail) from error
             raise HTTPException(
@@ -616,7 +675,11 @@ def create_app() -> FastAPI:
             raise HTTPException(
                 status_code=503, detail="inference configuration unavailable"
             ) from error
-        return {"deleted": True, "instance_id": instance_id}
+        return {
+            "deletion_queued": True,
+            "instance_id": instance_id,
+            "workload_status": "deleting",
+        }
 
     @app.post(
         "/internal/management/inference-model-downloads",
@@ -722,6 +785,54 @@ def create_app() -> FastAPI:
         except Exception as error:
             raise HTTPException(
                 status_code=503, detail="model rollout status unavailable"
+            ) from error
+        return {"event_id": event_id, "status": status}
+
+    @app.post(
+        "/internal/reconciler/inference-workloads/claim",
+        response_model=InferenceWorkloadClaimResponse,
+        dependencies=[Depends(authenticate_model_reconciler)],
+    )
+    async def claim_inference_workload(payload: InferenceWorkloadClaimPayload):
+        try:
+            event = await run_in_threadpool(
+                inference_config_store.claim_workload,
+                lease_seconds=payload.lease_seconds,
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="inference workload queue unavailable"
+            ) from error
+        return {"event": event}
+
+    @app.post(
+        "/internal/reconciler/inference-workloads/{event_id}/ack",
+        response_model=InferenceWorkloadAcknowledgeResponse,
+        dependencies=[Depends(authenticate_model_reconciler)],
+    )
+    async def acknowledge_inference_workload(
+        event_id: UUID, payload: InferenceWorkloadAcknowledgePayload
+    ):
+        try:
+            status = await run_in_threadpool(
+                inference_config_store.acknowledge_workload,
+                event_id,
+                payload.lease_token,
+                succeeded=payload.outcome == "succeeded",
+            )
+        except ValueError as error:
+            detail = str(error)
+            if detail == "unknown inference workload event":
+                raise HTTPException(
+                    status_code=404, detail="inference workload event not found"
+                ) from error
+            raise HTTPException(
+                status_code=409,
+                detail="inference workload acknowledgment is no longer active",
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=503, detail="inference workload status unavailable"
             ) from error
         return {"event_id": event_id, "status": status}
 
@@ -845,19 +956,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/readyz", response_model=None)
-    async def readyz() -> dict[str, str] | JSONResponse:
-        if not app.state.local_model_required:
-            return {"status": "ok"}
-        provider = app.state.proposal_provider
-        try:
-            ready = provider is not None and await run_in_threadpool(provider.is_ready)
-        except Exception:
-            ready = False
-        if not ready:
-            return JSONResponse(
-                status_code=503,
-                content={"status": "unavailable", "dependency": "local_model"},
-            )
+    async def readyz() -> dict[str, str]:
         return {"status": "ok"}
 
     return app

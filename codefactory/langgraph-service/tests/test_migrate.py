@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -6,6 +7,8 @@ from langgraph_service.storage.migrate import (
     GLOBAL_MODEL_DOWNLOADS_MIGRATION_FILES,
     INFERENCE_INSTANCE_LIFECYCLE_MIGRATION_FILES,
     INFERENCE_MODEL_APPLY_MIGRATION_FILES,
+    INFERENCE_WORKLOAD_LIFECYCLE_SETUP_MIGRATION_FILES,
+    INFERENCE_WORKLOAD_LIFECYCLE_MIGRATION_FILES,
     INCREMENTAL_MIGRATION_FILES,
     MIGRATION_FILES,
     MULTIPLE_INFERENCE_INSTANCES_MIGRATION_FILES,
@@ -43,6 +46,46 @@ def test_multiple_instance_profile_selects_only_migration_012(tmp_path):
     assert tuple(
         path.name for path in _migration_files("inference-012", directory)
     ) == (MULTIPLE_INFERENCE_INSTANCES_MIGRATION_FILES)
+
+
+def test_inference_workload_lifecycle_profile_selects_only_migration_016(tmp_path):
+    directory = _migration_directory(tmp_path, MIGRATION_FILES)
+
+    assert (
+        tuple(path.name for path in _migration_files("inference-016", directory))
+        == INFERENCE_WORKLOAD_LIFECYCLE_MIGRATION_FILES
+    )
+
+
+def test_inference_workload_lifecycle_setup_profile_selects_migrations_015_then_016(
+    tmp_path,
+):
+    directory = _migration_directory(tmp_path, MIGRATION_FILES)
+
+    assert (
+        tuple(path.name for path in _migration_files("inference-015-016", directory))
+        == INFERENCE_WORKLOAD_LIFECYCLE_SETUP_MIGRATION_FILES
+    )
+
+
+def test_inference_runtime_options_profile_selects_only_migration_017(tmp_path):
+    directory = _migration_directory(tmp_path, MIGRATION_FILES)
+
+    assert tuple(
+        path.name for path in _migration_files("inference-017", directory)
+    ) == ("017_inference_runtime_options.sql",)
+
+
+def test_fresh_inference_configuration_migration_does_not_seed_instances():
+    migration = (
+        Path(__file__).parents[1]
+        / "migrations"
+        / "009_inference_instance_config.sql"
+    )
+
+    assert "INSERT INTO langgraph_service.inference_instance_config" not in (
+        migration.read_text(encoding="utf-8")
+    )
 
 
 def test_global_model_downloads_profile_selects_only_migration_013(tmp_path):
@@ -123,7 +166,7 @@ def test_agent_repair_request_migration_follows_feedback_reply_migration():
 
 
 def test_inference_instance_and_rollout_migrations_are_registered_in_order():
-    assert MIGRATION_FILES[-8:] == (
+    assert MIGRATION_FILES[-10:] == (
         "008_langgraph_model_profile.sql",
         "009_inference_instance_config.sql",
         "010_inference_model_downloads.sql",
@@ -132,4 +175,6 @@ def test_inference_instance_and_rollout_migrations_are_registered_in_order():
         "013_global_model_downloads.sql",
         "014_inference_model_apply.sql",
         "015_inference_instance_lifecycle.sql",
+        "016_inference_workload_lifecycle.sql",
+        "017_inference_runtime_options.sql",
     )

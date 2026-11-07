@@ -65,23 +65,34 @@ filled with zero.
 
 ## Model Rollout Reconciler
 
-The single-replica `inference-model-rollout-reconciler` consumes the durable
-LangGraph rollout outbox after verified publication. It patches only the fixed
-`llama-cpp-server` or `llama-cpp-server-cpu` Deployment selected by the trusted
-`instance_id`, sets `--model` to the validated `/models/<filename>` path, and
-acknowledges success only after the
-Deployment's observed generation, updated replicas, and available replicas
-match the patched generation. Timeout or Kubernetes patch/read failures are
-acknowledged as failed using the fixed public status from the service. Download
-`ready` means artifact publication; rollout `ready` means this Deployment
-reconciliation completed. It does not independently verify inference behavior.
+The single-replica `inference-model-rollout-reconciler` consumes both the
+durable workload lifecycle outbox and the model rollout outbox. Workload events
+create CPU/GPU Deployments and Services from the read-only generated template
+ConfigMap, adopt only the two known defaults labeled `inference-serving`, and
+delete only resources bearing the controller ownership labels. Model rollout
+events set `--model` to the validated `/models/<filename>` path and acknowledge
+success only after the Deployment's observed generation, updated replicas, and
+available replicas match the patched generation. Workload failures are
+retried with backoff and public status uses fixed safe text. Workload `ready`
+means the Deployment has available replicas; model rollout `ready` means its
+event was acknowledged. Neither independently verifies inference behavior.
+
+The inference Deployment templates are sourced from the checked-in CPU/GPU
+profile manifests, but Kustomize publishes them as ConfigMap data instead of
+applying the resources directly. The portal and LangGraph stay in namespace
+`codefactory`; inference Services, Deployments, artifacts, and the reconciler
+stay in namespace `inference`. This keeps control-plane ownership separate
+from inference resources and avoids a later Kustomize apply recreating a
+workload deleted through the portal.
 
 The reconciler uses the Codefactory LangGraph image and its
-`model-rollout-reconciler` entrypoint. Its only Kubernetes permissions are
-`get` and `patch` on the two named Deployments and `get` on their `status`
-subresources in namespace `inference`. It has no model volume, PVC, Secret,
-Pod, Node, or cluster-wide access. The downloader remains without a Kubernetes
-service account token or Deployment permissions.
+`model-rollout-reconciler` entrypoint. Its Kubernetes permissions are limited
+to get/create/patch/delete on Deployments and Services and get on Deployment
+status in namespace `inference`; it has no list or cluster-wide permissions.
+The controller derives resource names from validated instance IDs and checks
+ownership labels before mutation or deletion. It has no model volume, PVC,
+Pod, Node, or Secret access. The downloader remains without a Kubernetes
+service account token or workload permissions.
 
 Before enabling either workload, provide the same random
 `MODEL_RECONCILER_TOKEN` through the approved Secret manager: key
@@ -96,11 +107,11 @@ lease exceeds the 600-second rollout timeout so the reconciler has time to
 acknowledge before the lease can be reclaimed.
 
 The shared Codefactory migration Job defaults to the full migration sequence
-for fresh databases. The dev environment explicitly selects migrations 009,
-010, and 011 for its existing database, which is already at 008; this profile
-does not replay earlier migrations. Apply the Codefactory migrations and
-provide both Secret keys before enabling the reconciler. The rendered manifests do not create or read
-Secret values, download models, or apply resources to a cluster.
+for fresh databases. The dev environment selects migration 016 after migration
+015; this profile does not replay earlier migrations. Apply the Codefactory
+migrations and provide both Secret keys before enabling the reconciler. The
+rendered manifests do not create or read Secret values, download models, or
+apply resources to a cluster.
 
 Render the combined infrastructure without changing a cluster:
 

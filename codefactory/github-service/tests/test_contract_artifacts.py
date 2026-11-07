@@ -128,6 +128,12 @@ def test_workflow_inspection_contract_is_authenticated_and_read_only():
         ]
     )
     assert "/internal/management/inference-instances" in langgraph_contract["paths"]
+    assert langgraph_contract["paths"][
+        "/internal/reconciler/inference-workloads/claim"
+    ]["post"]["security"] == [{"reconcilerBearerAuth": []}]
+    assert langgraph_contract["paths"][
+        "/internal/reconciler/inference-workloads/{event_id}/ack"
+    ]["post"]["security"] == [{"reconcilerBearerAuth": []}]
     assert langgraph_contract["paths"]["/internal/management/agent-roster"]["get"][
         "security"
     ] == [{"bearerAuth": []}]
@@ -247,6 +253,18 @@ def test_inference_download_and_metrics_contracts_are_registered_and_safe():
             "download_request_id",
             "download_error",
         }.intersection(instance_properties)
+        workload_status_schema = instance_properties["workload_status"]
+        if "$ref" in workload_status_schema:
+            assert workload_status_schema["$ref"].endswith("/InferenceWorkloadStatus")
+        else:
+            assert workload_status_schema["enum"] == [
+                "provisioning",
+                "ready",
+                "deleting",
+                "failed",
+                "deleted",
+            ]
+        assert "workload_error" in instance_properties
     assert (
         "model_url"
         not in langgraph_contract["components"]["schemas"]["ModelDownloadRecord"][

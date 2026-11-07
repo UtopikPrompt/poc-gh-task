@@ -1,3 +1,4 @@
+import json
 from uuid import uuid4
 
 import httpx
@@ -39,6 +40,7 @@ def _deployment(*, generation=2, observed=2, updated=1, available=1, args=None):
         },
         "status": {
             "observedGeneration": observed,
+            "replicas": 1,
             "updatedReplicas": updated,
             "availableReplicas": available,
         },
@@ -61,6 +63,83 @@ def _reconciler(service_transport, kubernetes_transport, **kwargs):
         ),
         **settings,
     )
+
+
+def _workload_event(operation="ensure", instance_id="gpu-secondary"):
+    return {
+        "event_id": str(uuid4()),
+        "instance_id": instance_id,
+        "operation": operation,
+        "model_filename": "approved.gguf",
+        "context_size": 4096 if instance_id.startswith("cpu") else 8192,
+        "threads": 3,
+        "lease_token": str(uuid4()),
+        "attempts": 1,
+    }
+
+
+def _write_templates(directory):
+    directory.mkdir()
+    template = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-cpp-server
+  labels:
+    app.kubernetes.io/name: llama-cpp-server
+    app.kubernetes.io/part-of: inference-serving
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llama-cpp-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llama-cpp-server
+        app.kubernetes.io/part-of: inference-serving
+    spec:
+      containers:
+      - name: llama-server
+        args: [--model, /models/model.gguf]
+        ports:
+        - name: http
+          containerPort: 8080
+"""
+    for profile in ("gpu", "cpu"):
+        (directory / f"{profile}-deployment.yaml").write_text(template)
+
+
+def _owned_workload(instance_id="gpu-secondary"):
+    name = f"llama-cpp-server-{instance_id}"
+    labels = {
+        "app.kubernetes.io/name": name,
+        "app.kubernetes.io/part-of": "inference-serving",
+        "codefactory.io/managed-inference-workload": "true",
+        "codefactory.io/inference-instance": instance_id,
+    }
+    return {
+        "metadata": {"name": name, "labels": labels, "generation": 1},
+        "spec": {
+            "replicas": 1,
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "llama-server",
+                            "args": ["--model", "/models/approved.gguf"],
+                        }
+                    ]
+                },
+            },
+        },
+        "status": {
+            "observedGeneration": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        },
+    }
 
 
 def test_reconciler_patches_only_the_mapped_deployment_and_acks_ready():
@@ -209,3 +288,254 @@ def test_reconciler_fails_ack_when_deployment_does_not_converge():
         for path in deployment_paths
     )
     assert b'"outcome":"failed"' in acknowledgments[0]
+
+
+def test_workload_create_waits_for_deployment_rollout_convergence(tmp_path):
+    event = _workload_event()
+    templates = tmp_path / "templates"
+    _write_templates(templates)
+    resources = {}
+    requests = []
+    deployment_gets = 0
+
+    def kubernetes(request):
+        nonlocal deployment_gets
+        requests.append(request)
+        path = request.url.path
+        if request.method == "GET":
+            resource = resources.get(path)
+            if resource and resource.get("kind") == "Deployment":
+                deployment_gets += 1
+                resource["status"]["replicas"] = 2 if deployment_gets == 1 else 1
+            return (
+                httpx.Response(200, json=resource) if resource else httpx.Response(404)
+            )
+        if request.method == "POST":
+            resource = json.loads(request.read())
+            resource.setdefault("metadata", {})["generation"] = 1
+            if resource["kind"] == "Deployment":
+                resource["status"] = {
+                    "observedGeneration": 1,
+                    "replicas": 2,
+                    "updatedReplicas": 1,
+                    "availableReplicas": 1,
+                }
+            name = resource["metadata"]["name"]
+            kind = "deployments" if resource["kind"] == "Deployment" else "services"
+            group = "/apis/apps/v1" if kind == "deployments" else "/api/v1"
+            resources[f"{group}/namespaces/inference/{kind}/{name}"] = resource
+            return httpx.Response(201, json=resource)
+        raise AssertionError(f"unexpected Kubernetes method: {request.method}")
+
+    acknowledgments = []
+
+    def service(request):
+        acknowledgments.append((request.url.path, request.read()))
+        return httpx.Response(
+            200, json={"event_id": event["event_id"], "status": "succeeded"}
+        )
+
+    reconciler = _reconciler(
+        httpx.MockTransport(service),
+        httpx.MockTransport(kubernetes),
+        template_directory=templates,
+    )
+
+    assert reconciler.process_workload(event) == "succeeded"
+    assert deployment_gets == 2
+    created = resources[
+        "/apis/apps/v1/namespaces/inference/deployments/llama-cpp-server-gpu-secondary"
+    ]
+    assert (
+        created["metadata"]["labels"]["codefactory.io/inference-instance"]
+        == "gpu-secondary"
+    )
+    assert created["spec"]["template"]["spec"]["containers"][0]["args"] == [
+        "--model",
+        "/models/approved.gguf",
+        "--ctx-size",
+        "8192",
+        "--threads",
+        "3",
+    ]
+    service = resources[
+        "/api/v1/namespaces/inference/services/llama-cpp-server-gpu-secondary"
+    ]
+    assert service["spec"]["selector"] == {
+        "app.kubernetes.io/name": "llama-cpp-server-gpu-secondary"
+    }
+    assert service["spec"]["ports"][0]["port"] == 8080
+    assert any(
+        request.method == "POST" and "/services" in request.url.path
+        for request in requests
+    )
+    assert acknowledgments[0][0].endswith(f"/{event['event_id']}/ack")
+    assert b'"outcome":"succeeded"' in acknowledgments[0][1]
+
+
+def test_workload_delete_removes_only_controller_owned_resources():
+    event = _workload_event(operation="delete")
+    deployment = _owned_workload()
+    name = deployment["metadata"]["name"]
+    deployment_url = f"/apis/apps/v1/namespaces/inference/deployments/{name}"
+    service_url = f"/api/v1/namespaces/inference/services/{name}"
+    service = {
+        "metadata": {
+            "name": name,
+            "labels": deployment["metadata"]["labels"],
+        }
+    }
+    resources = {deployment_url: deployment, service_url: service}
+    deleted = []
+
+    def kubernetes(request):
+        path = request.url.path
+        if request.method == "GET":
+            return (
+                httpx.Response(200, json=resources[path])
+                if path in resources
+                else httpx.Response(404)
+            )
+        if request.method == "DELETE":
+            deleted.append(path)
+            resources.pop(path, None)
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected Kubernetes method: {request.method}")
+
+    service_transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, json={"event_id": event["event_id"], "status": "succeeded"}
+        )
+    )
+    reconciler = _reconciler(service_transport, httpx.MockTransport(kubernetes))
+
+    assert reconciler.process_workload(event) == "succeeded"
+    assert deleted == [service_url, deployment_url]
+    assert not resources
+
+
+def test_workload_delete_refuses_unowned_secondary_resources():
+    event = _workload_event(operation="delete")
+    resource = _owned_workload()
+    resource["metadata"]["labels"].pop("codefactory.io/managed-inference-workload")
+    acknowledgments = []
+
+    def kubernetes(request):
+        return httpx.Response(200, json=resource)
+
+    def service(request):
+        acknowledgments.append(request.read())
+        return httpx.Response(
+            200, json={"event_id": event["event_id"], "status": "retrying"}
+        )
+
+    result = _reconciler(
+        httpx.MockTransport(service), httpx.MockTransport(kubernetes)
+    ).process_workload(event)
+
+    assert result == "retrying"
+    assert b'"outcome":"failed"' in acknowledgments[0]
+
+
+def test_workload_ensure_adopts_only_known_default_resources(tmp_path):
+    event = _workload_event(instance_id="gpu")
+    templates = tmp_path / "templates"
+    _write_templates(templates)
+    deployment = {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": "llama-cpp-server",
+            "labels": {"app.kubernetes.io/part-of": "inference-serving"},
+            "generation": 1,
+        },
+        "spec": {
+            "replicas": 1,
+            "template": {
+                "metadata": {
+                    "labels": {"app.kubernetes.io/part-of": "inference-serving"}
+                },
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "llama-server",
+                            "args": ["--model", "/models/approved.gguf"],
+                        }
+                    ]
+                },
+            },
+        },
+        "status": {
+            "observedGeneration": 1,
+            "replicas": 1,
+            "updatedReplicas": 1,
+            "availableReplicas": 1,
+        },
+    }
+    service = {
+        "metadata": {
+            "name": "llama-cpp-server",
+            "labels": {"app.kubernetes.io/part-of": "inference-serving"},
+        }
+    }
+    resources = {
+        "/apis/apps/v1/namespaces/inference/deployments/llama-cpp-server": deployment,
+        "/api/v1/namespaces/inference/services/llama-cpp-server": service,
+    }
+    patches = []
+
+    def kubernetes(request):
+        path = request.url.path
+        if request.method == "GET":
+            return httpx.Response(200, json=resources[path])
+        if request.method == "PATCH":
+            patch = json.loads(request.read())
+            patches.append((path, patch))
+            current = resources[path]
+            if path.endswith("/deployments/llama-cpp-server"):
+                current["metadata"].setdefault("labels", {}).update(
+                    patch["metadata"]["labels"]
+                )
+                current["spec"]["template"]["metadata"].setdefault("labels", {}).update(
+                    patch["spec"]["template"]["metadata"]["labels"]
+                )
+                current["metadata"]["generation"] = 2
+                current["status"]["observedGeneration"] = 2
+            else:
+                current["metadata"].setdefault("labels", {}).update(
+                    patch["metadata"]["labels"]
+                )
+            return httpx.Response(200, json=current)
+        raise AssertionError(f"unexpected Kubernetes method: {request.method}")
+
+    service_transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"event_id": event["event_id"], "status": "succeeded"}
+        )
+    )
+    reconciler = _reconciler(
+        service_transport,
+        httpx.MockTransport(kubernetes),
+        template_directory=templates,
+    )
+
+    assert reconciler.process_workload(event) == "succeeded"
+    assert len(patches) == 2
+    deployment_patch = next(
+        patch
+        for path, patch in patches
+        if path.endswith("/deployments/llama-cpp-server")
+    )
+    assert deployment_patch["spec"]["template"]["spec"]["containers"][0]["args"] == [
+        "--model",
+        "/models/approved.gguf",
+        "--ctx-size",
+        "8192",
+        "--threads",
+        "3",
+    ]
+    assert all(
+        patch["metadata"]["labels"]["codefactory.io/managed-inference-workload"]
+        == "true"
+        for _, patch in patches
+    )

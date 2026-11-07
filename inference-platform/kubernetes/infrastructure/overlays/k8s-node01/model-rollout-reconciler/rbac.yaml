@@ -17,10 +17,13 @@ metadata:
 rules:
 - apiGroups: [ "apps" ]
   resources: [ "deployments" ]
-  verbs: [ "get", "patch" ]
+  verbs: [ "get", "create", "patch", "delete" ]
 - apiGroups: [ "apps" ]
   resources: [ "deployments/status" ]
   verbs: [ "get" ]
+- apiGroups: [ "" ]
+  resources: [ "services" ]
+  verbs: [ "get", "create", "patch", "delete" ]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

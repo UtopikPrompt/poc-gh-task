@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import pytest
 
@@ -12,6 +13,32 @@ GPU_MODEL = "qwen2.5-32b-instruct-q4_k_m.gguf"
 CPU_MODEL = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
 
+def test_inference_runtime_options_respect_cpu_and_gpu_profiles():
+    gpu = InferenceInstanceConfig(
+        instance_id="gpu-new",
+        model_filename=GPU_MODEL,
+        context_size=16384,
+        threads=8,
+    )
+    assert gpu.context_size == 16384
+    assert gpu.threads == 8
+
+    with pytest.raises(ValueError, match="CPU instance profile limit"):
+        InferenceInstanceConfig(
+            instance_id="cpu-new",
+            model_filename=CPU_MODEL,
+            context_size=8192,
+            threads=2,
+        )
+    with pytest.raises(ValueError, match="CPU instance profile limit"):
+        InferenceInstanceConfig(
+            instance_id="cpu-new",
+            model_filename=CPU_MODEL,
+            context_size=1024,
+            threads=5,
+        )
+
+
 def test_inference_config_store_reads_both_instances_and_updates_only_one():
     state = {
         "rows": {
@@ -20,6 +47,7 @@ def test_inference_config_store_reads_both_instances_and_updates_only_one():
                 "model_filename": GPU_MODEL,
                 "version": 0,
                 "rollout_status": "not_requested",
+                "workload_status": "ready",
                 "updated_at": None,
                 "updated_by": None,
             },
@@ -28,6 +56,7 @@ def test_inference_config_store_reads_both_instances_and_updates_only_one():
                 "model_filename": CPU_MODEL,
                 "version": 0,
                 "rollout_status": "not_requested",
+                "workload_status": "ready",
                 "updated_at": None,
                 "updated_by": None,
             },
@@ -36,6 +65,7 @@ def test_inference_config_store_reads_both_instances_and_updates_only_one():
                 "model_filename": GPU_MODEL,
                 "version": 0,
                 "rollout_status": "not_requested",
+                "workload_status": "ready",
                 "updated_at": None,
                 "updated_by": None,
             },
@@ -44,6 +74,7 @@ def test_inference_config_store_reads_both_instances_and_updates_only_one():
                 "model_filename": CPU_MODEL,
                 "version": 0,
                 "rollout_status": "not_requested",
+                "workload_status": "ready",
                 "updated_at": None,
                 "updated_by": None,
             },
@@ -172,6 +203,7 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
                 "updated_at": None,
                 "updated_by": None,
                 "is_active": True,
+                "workload_status": "ready",
             },
             "cpu": {
                 "instance_id": "cpu",
@@ -182,6 +214,7 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
                 "updated_at": None,
                 "updated_by": None,
                 "is_active": True,
+                "workload_status": "ready",
             },
         },
         "query": "",
@@ -198,11 +231,13 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
         def execute(self, query, parameters=()):
             state["query"] = query
             state["parameters"] = parameters
-            if query.startswith("INSERT INTO"):
-                instance_id, filename, login = parameters
+            if "inference_instance_config" in query and query.startswith("INSERT"):
+                instance_id, filename, context_size, threads, login = parameters
                 state["rows"][instance_id] = {
                     "instance_id": instance_id,
                     "model_filename": filename,
+                    "context_size": context_size,
+                    "threads": threads,
                     "version": 1,
                     "rollout_status": "not_requested",
                     "rollout_request_id": None,
@@ -211,9 +246,25 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
                     "updated_at": datetime.now(timezone.utc),
                     "updated_by": login,
                     "is_active": True,
+                    "workload_status": "provisioning",
                 }
+            elif query.startswith("UPDATE") and "SET model_filename" in query:
+                instance_id = parameters[-1]
+                state["rows"][instance_id].update(
+                    model_filename=parameters[0],
+                    context_size=parameters[1],
+                    threads=parameters[2],
+                    version=2,
+                    updated_by=parameters[3],
+                    is_active=True,
+                    workload_status="provisioning",
+                )
+            elif "inference_workload_outbox" in query:
+                state.setdefault("workload_events", []).append(parameters)
             elif query.startswith("UPDATE"):
-                state["rows"][parameters[0]]["is_active"] = False
+                row = state["rows"][parameters[0]]
+                row["is_active"] = False
+                row["workload_status"] = "deleting"
 
         def fetchall(self):
             return [row for row in state["rows"].values() if row["is_active"]]
@@ -226,6 +277,8 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
                         row["is_active"] for row in state["rows"].values()
                     )
                 }
+            if query.startswith("UPDATE") and "SET model_filename" in query:
+                return state["rows"].get(state["parameters"][-1])
             instance_id = state["parameters"][0]
             row = state["rows"].get(instance_id)
             if "AND is_active" in query and row is not None and not row["is_active"]:
@@ -253,6 +306,10 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
     assert created.version == 1
     assert created.updated_by == "owner"
     assert created.config.rollout_status == "not_requested"
+    assert created.config.workload_status == "provisioning"
+    assert created.config.context_size == 1024
+    assert created.config.threads == 2
+    assert state["workload_events"][-1][1:] == ("gpu-extra",)
     with pytest.raises(ValueError, match="inference instance already exists"):
         store.create(
             InferenceInstanceConfig(instance_id="gpu-extra", model_filename=GPU_MODEL),
@@ -267,15 +324,107 @@ def test_inference_config_store_creates_and_soft_deletes_instances_safely():
     with pytest.raises(ValueError, match="inference model rollout is active"):
         store.delete("gpu-extra")
     state["rows"]["gpu-extra"]["rollout_status"] = "not_requested"
+    state["rows"]["gpu-extra"]["workload_status"] = "ready"
     store.delete("gpu-extra")
 
     assert "gpu-extra" not in store.get_all()
     assert state["rows"]["gpu-extra"]["is_active"] is False
+    assert state["rows"]["gpu-extra"]["workload_status"] == "deleting"
     with pytest.raises(ValueError, match="unknown inference instance"):
         store.update(
             InferenceInstanceConfig(instance_id="gpu-extra", model_filename=GPU_MODEL),
             updated_by="owner",
         )
+    state["rows"]["gpu-extra"]["workload_status"] = "deleted"
+    recreated = store.create(
+        InferenceInstanceConfig(
+            instance_id="gpu-extra",
+            model_filename=GPU_MODEL,
+            context_size=8192,
+            threads=3,
+        ),
+        created_by="owner",
+    )
+    assert recreated.version == 2
+    assert recreated.config.workload_status == "provisioning"
+    assert recreated.config.context_size == 8192
+    assert recreated.config.threads == 3
+    state["rows"]["gpu-extra"]["workload_status"] = "ready"
+    store.delete("gpu-extra")
     store.delete("gpu")
-    with pytest.raises(ValueError, match="at least one inference instance must remain"):
-        store.delete("cpu")
+    store.delete("cpu")
+    assert not store.get_all()
+
+
+def test_inference_workload_queue_claims_and_acknowledges_with_a_lease():
+    event_id = uuid4()
+    lease_token = uuid4()
+    state = {"query": "", "parameters": (), "queries": [], "lease_active": True}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, query, parameters=()):
+            state["query"] = query
+            state["parameters"] = parameters
+            state["queries"].append(query)
+
+        def fetchone(self):
+            if "inference_workload_outbox AS event" in state["query"]:
+                return {
+                    "event_id": event_id,
+                    "instance_id": "gpu-secondary",
+                    "operation": "ensure",
+                    "attempts": 2,
+                    "model_filename": GPU_MODEL,
+                    "context_size": 8192,
+                    "threads": 3,
+                }
+            if "completed_lease_token" in state["query"]:
+                return {
+                    "instance_id": "gpu-secondary",
+                    "operation": "ensure",
+                    "status": "leased",
+                    "lease_token": lease_token,
+                    "completed_lease_token": None,
+                    "lease_active": state["lease_active"],
+                }
+            return None
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    store = PostgresInferenceInstanceConfigStore(
+        "postgresql://test", connection_factory=lambda *_args, **_kwargs: Connection()
+    )
+
+    claim = store.claim_workload(120)
+    assert claim is not None
+    assert claim.event_id == event_id
+    assert claim.instance_id == "gpu-secondary"
+    assert claim.operation == "ensure"
+    assert claim.attempts == 3
+    assert claim.context_size == 8192
+    assert claim.threads == 3
+    assert "FOR UPDATE OF event SKIP LOCKED" in state["queries"][0]
+    assert state["queries"][1].find("lease_until") > 0
+
+    assert (
+        store.acknowledge_workload(event_id, lease_token, succeeded=True) == "succeeded"
+    )
+    assert any("completed_lease_token = %s" in query for query in state["queries"])
+
+    state["lease_active"] = False
+    with pytest.raises(ValueError, match="inference workload lease is stale"):
+        store.acknowledge_workload(event_id, lease_token, succeeded=False)

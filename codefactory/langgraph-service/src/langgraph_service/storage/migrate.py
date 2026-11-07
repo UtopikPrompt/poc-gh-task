@@ -31,6 +31,8 @@ MIGRATION_FILES = (
     "013_global_model_downloads.sql",
     "014_inference_model_apply.sql",
     "015_inference_instance_lifecycle.sql",
+    "016_inference_workload_lifecycle.sql",
+    "017_inference_runtime_options.sql",
 )
 INCREMENTAL_MIGRATION_FILES = (
     "009_inference_instance_config.sql",
@@ -42,6 +44,12 @@ MULTIPLE_INFERENCE_INSTANCES_MIGRATION_FILES = ("012_multiple_inference_instance
 GLOBAL_MODEL_DOWNLOADS_MIGRATION_FILES = ("013_global_model_downloads.sql",)
 INFERENCE_MODEL_APPLY_MIGRATION_FILES = ("014_inference_model_apply.sql",)
 INFERENCE_INSTANCE_LIFECYCLE_MIGRATION_FILES = ("015_inference_instance_lifecycle.sql",)
+INFERENCE_WORKLOAD_LIFECYCLE_MIGRATION_FILES = ("016_inference_workload_lifecycle.sql",)
+INFERENCE_RUNTIME_OPTIONS_MIGRATION_FILES = ("017_inference_runtime_options.sql",)
+INFERENCE_WORKLOAD_LIFECYCLE_SETUP_MIGRATION_FILES = (
+    *INFERENCE_INSTANCE_LIFECYCLE_MIGRATION_FILES,
+    *INFERENCE_WORKLOAD_LIFECYCLE_MIGRATION_FILES,
+)
 MIGRATION_PROFILES = {
     "full": MIGRATION_FILES,
     "inference-009-012": INCREMENTAL_MIGRATION_FILES,
@@ -49,6 +57,9 @@ MIGRATION_PROFILES = {
     "inference-013": GLOBAL_MODEL_DOWNLOADS_MIGRATION_FILES,
     "inference-014": INFERENCE_MODEL_APPLY_MIGRATION_FILES,
     "inference-015": INFERENCE_INSTANCE_LIFECYCLE_MIGRATION_FILES,
+    "inference-016": INFERENCE_WORKLOAD_LIFECYCLE_MIGRATION_FILES,
+    "inference-017": INFERENCE_RUNTIME_OPTIONS_MIGRATION_FILES,
+    "inference-015-016": INFERENCE_WORKLOAD_LIFECYCLE_SETUP_MIGRATION_FILES,
 }
 
 

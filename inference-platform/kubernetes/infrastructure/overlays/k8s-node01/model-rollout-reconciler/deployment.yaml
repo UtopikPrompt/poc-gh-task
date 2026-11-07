@@ -35,6 +35,10 @@ spec:
         envFrom:
         - configMapRef:
             name: inference-model-reconciler-config
+        volumeMounts:
+        - name: workload-templates
+          mountPath: /etc/inference-workload-templates
+          readOnly: true
         env:
         - name: MODEL_RECONCILER_TOKEN
           valueFrom:
@@ -71,3 +75,7 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: [ "ALL" ]
+      volumes:
+      - name: workload-templates
+        configMap:
+          name: inference-workload-templates

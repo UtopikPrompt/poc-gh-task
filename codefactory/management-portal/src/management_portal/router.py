@@ -44,6 +44,7 @@ from management_portal.settings import PortalSettings
 ASSETS_DIRECTORY = Path(__file__).parent / "assets"
 PORTAL_HTML = (ASSETS_DIRECTORY / "index.html").read_text(encoding="utf-8")
 SETTINGS_HTML = (ASSETS_DIRECTORY / "settings.html").read_text(encoding="utf-8")
+INFERENCE_HTML = (ASSETS_DIRECTORY / "inference.html").read_text(encoding="utf-8")
 InferenceInstanceId = Annotated[
     str,
     StringConstraints(
@@ -79,6 +80,16 @@ class InferenceInstancePayload(BaseModel):
 
 class InferenceInstanceCreatePayload(InferenceInstancePayload):
     instance_id: InferenceInstanceId
+    context_size: int = Field(strict=True, ge=512, le=16384)
+    threads: int = Field(strict=True, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def validate_profile_limits(self) -> "InferenceInstanceCreatePayload":
+        if self.instance_id.startswith("cpu") and self.context_size > 4096:
+            raise ValueError("context_size exceeds the CPU instance profile limit")
+        if self.instance_id.startswith("cpu") and self.threads > 4:
+            raise ValueError("threads exceeds the CPU instance profile limit")
+        return self
 
 
 class InferenceInstanceConfigRecord(BaseModel):
@@ -90,6 +101,8 @@ class InferenceInstanceConfigRecord(BaseModel):
         max_length=205,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,199}\.gguf$",
     )
+    context_size: int = Field(strict=True, ge=512, le=16384)
+    threads: int = Field(strict=True, ge=1, le=8)
     rollout_status: Literal[
         "not_requested",
         "pending",
@@ -99,6 +112,10 @@ class InferenceInstanceConfigRecord(BaseModel):
     ] = "not_requested"
     rollout_request_id: str | None = None
     rollout_error: str | None = None
+    workload_status: Literal[
+        "provisioning", "ready", "deleting", "failed", "deleted"
+    ] = "ready"
+    workload_error: str | None = None
 
 
 class InferenceInstanceRecord(BaseModel):
@@ -600,6 +617,13 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             return RedirectResponse("/auth/login", status_code=303)
         return HTMLResponse(SETTINGS_HTML)
 
+    @router.get("/inference", response_class=HTMLResponse)
+    async def inference_configuration_page(request: Request):
+        require_dashboard_auth_configuration(settings)
+        if dashboard_session_login(request, settings) is None:
+            return RedirectResponse("/auth/login", status_code=303)
+        return HTMLResponse(INFERENCE_HTML)
+
     @router.get("/api/workflows")
     async def workflow_state(request: Request) -> dict[str, object]:
         _dashboard_login(request, settings)
@@ -795,9 +819,7 @@ def register_management_portal(app: FastAPI, settings: PortalSettings) -> None:
             method="DELETE",
             path=f"/internal/management/inference-instances/{instance_id}",
             not_found_detail="inference instance not found",
-            conflict_detail=(
-                "inference instance cannot be deleted while active or because it is the last instance"
-            ),
+            conflict_detail=("inference instance cannot be deleted while active"),
             unprocessable_detail="inference instance deletion was rejected",
         )
 

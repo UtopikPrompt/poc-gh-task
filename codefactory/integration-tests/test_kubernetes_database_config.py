@@ -6,6 +6,7 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KUBERNETES_ROOT = REPOSITORY_ROOT / "infra-codefactory/kubernetes"
+INFERENCE_KUBERNETES_ROOT = REPOSITORY_ROOT / "inference-platform/kubernetes"
 
 
 def _render_environment(environment: str) -> list[dict[str, object]]:
@@ -20,6 +21,44 @@ def _render_environment(environment: str) -> list[dict[str, object]]:
         text=True,
     ).stdout
     return list(yaml.safe_load_all(rendered))
+
+
+def test_inference_kustomizations_publish_templates_not_live_workloads():
+    paths = (
+        INFERENCE_KUBERNETES_ROOT,
+        INFERENCE_KUBERNETES_ROOT / "inference-serving/base",
+        INFERENCE_KUBERNETES_ROOT / "inference-serving/cpu",
+    )
+    workload_names = {"llama-cpp-server", "llama-cpp-server-cpu"}
+
+    for path in paths:
+        rendered = subprocess.run(
+            ["kubectl", "kustomize", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        resources = list(yaml.safe_load_all(rendered))
+        assert not any(
+            resource.get("kind") in {"Deployment", "Service"}
+            and resource.get("metadata", {}).get("name") in workload_names
+            for resource in resources
+        )
+
+    templates = next(
+        resource
+        for resource in yaml.safe_load_all(
+            subprocess.run(
+                ["kubectl", "kustomize", str(INFERENCE_KUBERNETES_ROOT)],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
+        if resource.get("kind") == "ConfigMap"
+        and resource.get("metadata", {}).get("name") == "inference-workload-templates"
+    )
+    assert {"gpu-deployment.yaml", "cpu-deployment.yaml"} <= set(templates["data"])
 
 
 def test_rendered_database_config_uses_shared_defaults_and_environment_overrides():
@@ -169,13 +208,14 @@ def test_postgres_and_migration_job_are_bundled_in_every_environment():
         assert "013_global_model_downloads.sql" in langgraph_migration_copy
         assert "014_inference_model_apply.sql" in langgraph_migration_copy
         assert "015_inference_instance_lifecycle.sql" in langgraph_migration_copy
+        assert "016_inference_workload_lifecycle.sql" in langgraph_migration_copy
         if environment == "dev":
             migration_profile = next(
                 item["value"]
                 for item in job_spec["containers"][0]["env"]
                 if item["name"] == "MIGRATION_PROFILE"
             )
-            assert migration_profile == "inference-015"
+            assert migration_profile == "inference-015-016"
         assert job_spec["containers"][0]["command"] == [
             "python",
             "-m",

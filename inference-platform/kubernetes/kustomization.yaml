@@ -1,13 +1,15 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-- inference-serving/base
-- inference-serving/cpu
 - infrastructure/overlays/k8s-node01/inference-storage
 - infrastructure/overlays/k8s-node01/model-download-worker
 - infrastructure/overlays/k8s-node01/model-rollout-reconciler
 - infrastructure/monitoring
+configMapGenerator:
+- name: inference-workload-templates
+  files:
+  - gpu-deployment.yaml=inference-serving/base/deployment.yaml
+  - cpu-deployment.yaml=inference-serving/cpu/deployment.yaml
+  options:
+    disableNameSuffixHash: true
 namespace: inference
-patches:
-- path: infrastructure/overlays/k8s-node01/inference-serving/node-specific.yaml
-- path: infrastructure/overlays/k8s-node01/inference-serving/cpu-node-specific.yaml

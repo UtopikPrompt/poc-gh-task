@@ -17,6 +17,18 @@ spec:
         app.kubernetes.io/part-of: inference-serving
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        supplementalGroups:
+        - 20000
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - k8s-node01
       containers:
       - name: llama-server
         image: ghcr.io/ggml-org/llama.cpp@sha256:c1d664830580e1651c1cc8d3bbc161af474800a56a83226e6e22f94bb8ba1c59
@@ -65,3 +77,11 @@ spec:
           limits:
             cpu: "4"
             memory: 4Gi
+        volumeMounts:
+        - name: model-artifacts
+          mountPath: /models
+          readOnly: true
+      volumes:
+      - name: model-artifacts
+        persistentVolumeClaim:
+          claimName: inference-model-artifacts

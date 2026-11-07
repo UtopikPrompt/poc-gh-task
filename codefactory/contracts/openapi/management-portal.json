@@ -227,7 +227,7 @@
         "/api/inference-instances": {
             "get": {
                 "operationId": "getInferenceInstances",
-                "description": "Owner-only view of desired GPU and CPU model metadata, with separate artifact download and deployment rollout states. Submitted URLs and hashes are not visible to ordinary organization members.",
+                "description": "Owner-only view of CPU/GPU inference Deployments and Services, desired model configuration, workload readiness, and separate model rollout state. Submitted URLs and hashes are not visible to ordinary organization members.",
                 "security": [
                     {
                         "portalSession": []
@@ -257,7 +257,7 @@
             },
             "post": {
                 "operationId": "createInferenceInstance",
-                "description": "Owner-only same-origin creation of saved instance metadata. The model must already be in shared storage; this does not provision a Deployment or roll out a model.",
+                "description": "Owner-only same-origin creation of a CPU or GPU inference workload. The ID prefix selects its profile, and the model must already be in shared storage. Provisioning and readiness are reported asynchronously.",
                 "security": [
                     {
                         "portalSession": []
@@ -275,7 +275,7 @@
                 },
                 "responses": {
                     "200": {
-                        "description": "Saved instance configuration created",
+                        "description": "Inference workload provisioning queued",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -384,7 +384,7 @@
             },
             "delete": {
                 "operationId": "deleteInferenceInstance",
-                "description": "Owner-only same-origin deactivation of a saved instance configuration. Historical references are retained; active work and deletion of the last configuration are rejected.",
+                "description": "Owner-only same-origin deactivation and deletion of the controller-owned inference Deployment and Service. Historical references are retained; active work, an unready workload, and deletion of the last active configuration are rejected.",
                 "parameters": [
                     {
                         "name": "instance_id",
@@ -403,7 +403,7 @@
                 ],
                 "responses": {
                     "200": {
-                        "description": "Instance configuration deactivated"
+                        "description": "Inference workload deletion queued"
                     },
                     "401": {
                         "$ref": "#/components/responses/Unauthorized"
@@ -712,7 +712,9 @@
                 "type": "object",
                 "required": [
                     "instance_id",
-                    "model_filename"
+                    "model_filename",
+                    "context_size",
+                    "threads"
                 ],
                 "properties": {
                     "instance_id": {
@@ -721,6 +723,16 @@
                     },
                     "model_filename": {
                         "$ref": "#/components/schemas/InferenceInstancePayload/properties/model_filename"
+                    },
+                    "context_size": {
+                        "type": "integer",
+                        "minimum": 512,
+                        "maximum": 16384
+                    },
+                    "threads": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8
                     }
                 },
                 "additionalProperties": false
@@ -758,9 +770,13 @@
                         "required": [
                             "instance_id",
                             "model_filename",
+                            "context_size",
+                            "threads",
                             "rollout_status",
                             "rollout_request_id",
-                            "rollout_error"
+                            "rollout_error",
+                            "workload_status",
+                            "workload_error"
                         ],
                         "properties": {
                             "instance_id": {
@@ -769,6 +785,16 @@
                             },
                             "model_filename": {
                                 "$ref": "#/components/schemas/InferenceInstancePayload/properties/model_filename"
+                            },
+                            "context_size": {
+                                "type": "integer",
+                                "minimum": 512,
+                                "maximum": 16384
+                            },
+                            "threads": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 8
                             },
                             "rollout_status": {
                                 "type": "string",
@@ -788,6 +814,23 @@
                                 "format": "uuid"
                             },
                             "rollout_error": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "maxLength": 200
+                            },
+                            "workload_status": {
+                                "type": "string",
+                                "enum": [
+                                    "provisioning",
+                                    "ready",
+                                    "deleting",
+                                    "failed",
+                                    "deleted"
+                                ]
+                            },
+                            "workload_error": {
                                 "type": [
                                     "string",
                                     "null"
